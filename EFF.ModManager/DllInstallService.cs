@@ -22,6 +22,28 @@ internal static class DllInstallService
 
     internal static bool IsManaged(string game) => ReadState(game) is { Files.Count: > 0 };
 
+    internal static Version? InstalledVersion(string game)
+    {
+        var dll = Path.Combine(game, "plugin", "eff.dll");
+        if (File.Exists(dll))
+        {
+            var info = FileVersionInfo.GetVersionInfo(dll);
+            var fileVersion = NormalizeVersion(info.ProductVersion) ?? NormalizeVersion(info.FileVersion);
+            if (fileVersion is not null) return fileVersion;
+        }
+        return NormalizeVersion(ReadState(game)?.Version);
+    }
+
+    private static Version? NormalizeVersion(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        value = value.Trim().TrimStart('v', 'V');
+        var suffix = value.IndexOfAny([' ', '+', '-']);
+        if (suffix >= 0) value = value[..suffix];
+        if (!Version.TryParse(value, out var version)) return null;
+        return new Version(version.Major, Math.Max(version.Minor, 0), Math.Max(version.Build, 0));
+    }
+
     internal static async Task<Version?> GetLatestVersionAsync(CancellationToken token)
     {
         var asset = await GitHubReleaseService.GetLatestDllAssetAsync(token);

@@ -37,8 +37,14 @@ internal static class RepairService
         }
     }
     internal static Dictionary<string, string> Author(string root) => Files(root)
-        .Where(p => Path.GetRelativePath(root, p) is not ("compiled.bin" or "source-inputs.bin") &&
-                    !(Path.GetRelativePath(root, p) == Receipt && LegacyReceipt(p)))
+        .Where(p =>
+        {
+            var relative = Path.GetRelativePath(root, p).Replace('\\', '/');
+            return !relative.Equals("compiled.bin", StringComparison.OrdinalIgnoreCase) &&
+                   !relative.Equals("source-inputs.bin", StringComparison.OrdinalIgnoreCase) &&
+                   !relative.StartsWith("compiled.blocks/", StringComparison.OrdinalIgnoreCase) &&
+                   !(relative.Equals(Receipt, StringComparison.OrdinalIgnoreCase) && LegacyReceipt(p));
+        })
         .ToDictionary(p => Path.GetRelativePath(root, p), Hash, StringComparer.OrdinalIgnoreCase);
     internal static string AuthorIdentity(string root)
     {

@@ -66,7 +66,7 @@ public sealed class LanguageService : INotifyPropertyChanged
         ["settings.zh"] = "中文",
         ["settings.en"] = "English",
         ["settings.updates"] = "更新",
-        ["settings.updatePolicy"] = "每次启动自动检查 GitHub Release。管理器新版自动下载并重启；DLL 新版可在概览中安装。",
+        ["settings.updatePolicy"] = "每次启动自动检查 GitHub Release。发现管理器或已安装 DLL 有新版本时弹窗提示；选择“否”会忽略该版本。",
         ["settings.checkUpdates"] = "立即检查",
         ["settings.resources"] = "资源位置",
         ["settings.resourceHint"] = "Repair 会在此处保存共享索引与下载缓存；更换位置不会删除已有资源。",
@@ -75,7 +75,8 @@ public sealed class LanguageService : INotifyPropertyChanged
         ["footer.unknownGame"] = "未选择游戏",
         ["dialog.confirmDelete"] = "确定删除所选 Mod？此操作会永久删除该 Mod 文件夹。",
         ["dialog.title"] = "EFF Mod 管理器",
-        ["dialog.managerUpdate"] = "发现管理器新版本 v{0}，是否立即下载并重启？",
+        ["dialog.managerUpdate"] = "发现管理器新版本 v{0}。是否立即下载并重启？选择“否”后启动时不再提示此版本；可在设置中手动检查。",
+        ["dialog.dllUpdate"] = "发现 EFF DLL 新版本 v{1}（当前 v{0}）。是否立即安装？选择“否”后启动时不再提示此版本；可在设置中手动检查。",
         ["dialog.unmanagedDll"] = "检测到一个未由管理器安装的 EFF DLL。继续后，管理器会先备份将要替换的文件。",
         ["dialog.uninstallDll"] = "将卸载管理器安装的 EFF 文件并还原安装前备份。被外部修改的文件会保留。",
         ["status.gameFound"] = "已识别游戏目录",
@@ -91,6 +92,7 @@ public sealed class LanguageService : INotifyPropertyChanged
         ["status.managerReleaseMissing"] = "管理器尚无在线 Release",
         ["status.upToDate"] = "已是最新版本",
         ["status.updateAvailable"] = "发现新版本",
+        ["status.versionUnknown"] = "未知",
         ["status.managerUpdating"] = "正在下载管理器更新…",
         ["status.ready"] = "就绪"
     };
@@ -156,7 +158,7 @@ public sealed class LanguageService : INotifyPropertyChanged
         ["settings.zh"] = "中文",
         ["settings.en"] = "English",
         ["settings.updates"] = "Updates",
-        ["settings.updatePolicy"] = "Check GitHub Releases at startup. Manager updates download and restart automatically. Install DLL updates from Overview.",
+        ["settings.updatePolicy"] = "Check GitHub Releases at startup. New manager or installed DLL versions prompt for an update; choose No to ignore that version.",
         ["settings.checkUpdates"] = "Check now",
         ["settings.resources"] = "Resource location",
         ["settings.resourceHint"] = "Repair stores the shared index and download cache here. Changing this location does not remove existing files.",
@@ -165,7 +167,8 @@ public sealed class LanguageService : INotifyPropertyChanged
         ["footer.unknownGame"] = "No game selected",
         ["dialog.confirmDelete"] = "Delete the selected Mod permanently? Its folder will be removed.",
         ["dialog.title"] = "EFF Mod Manager",
-        ["dialog.managerUpdate"] = "Manager version {0} is available. Download and restart now?",
+        ["dialog.managerUpdate"] = "Manager version {0} is available. Download and restart now? Choose No to stop automatic prompts for this version; manual checks can show it again.",
+        ["dialog.dllUpdate"] = "EFF DLL version {1} is available (installed: {0}). Install now? Choose No to stop automatic prompts for this version; manual checks can show it again.",
         ["dialog.unmanagedDll"] = "An EFF DLL not managed by this app already exists. Continue to back up files before replacing them.",
         ["dialog.uninstallDll"] = "EFF files installed by this app will be removed and pre-install backups restored. Files modified externally are preserved.",
         ["status.gameFound"] = "Game folder detected",
@@ -181,6 +184,7 @@ public sealed class LanguageService : INotifyPropertyChanged
         ["status.managerReleaseMissing"] = "No manager Release is published yet",
         ["status.upToDate"] = "Up to date",
         ["status.updateAvailable"] = "Update available",
+        ["status.versionUnknown"] = "unknown",
         ["status.managerUpdating"] = "Downloading manager update…",
         ["status.ready"] = "Ready"
     };

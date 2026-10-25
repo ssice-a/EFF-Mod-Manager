@@ -11,8 +11,11 @@
     <Compile Include="../../EFF.ModManager/ModService.cs" Link="ModService.cs" />
     <Compile Include="../../EFF.ModManager/GitHubReleaseService.cs" Link="GitHubReleaseService.cs" />
     <Compile Include="../../EFF.ModManager/DllInstallService.cs" Link="DllInstallService.cs" />
+    <Compile Include="../../EFF.ModManager/ManagerUpdateService.cs" Link="ManagerUpdateService.cs" />
     <Compile Include="../../EFF.ModManager/GameDiscovery.cs" Link="GameDiscovery.cs" />
     <Compile Include="../../EFF.ModManager/RepairCore/RepairCatalog.cs" Link="RepairCatalog.cs" />
     <Compile Include="../../EFF.ModManager/RepairCore/EndfieldIndexUpdates.cs" Link="EndfieldIndexUpdates.cs" />
+    <Compile Include="../../EFF.ModManager/RepairCore/EndfieldSharedIndexes.cs" Link="EndfieldSharedIndexes.cs" />
+    <Content Include="../../EFF.ModManager/RepairCore/eff_resource_pack.exe" Link="native/eff_resource_pack.exe" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

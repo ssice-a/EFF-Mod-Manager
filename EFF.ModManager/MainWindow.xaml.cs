@@ -72,6 +72,8 @@ public partial class MainWindow : Window
 
     private void SetGamePath(string path)
     {
+        if (!string.Equals(_settings.GamePath, path, StringComparison.OrdinalIgnoreCase))
+            _settings.IgnoredDllVersion = "";
         GamePathBox.Text = path;
         _settings.GamePath = path;
         FooterGame.Text = path;
@@ -172,12 +174,13 @@ public partial class MainWindow : Window
         }
 
         var state = DllInstallService.ReadState(GamePath);
+        var installedVersion = DllInstallService.InstalledVersion(GamePath);
         var dllFile = Path.Combine(GamePath, "plugin", "eff.dll");
         InstallDllButton.IsEnabled = true;
         if (state is { Files.Count: > 0 })
         {
             DllStateText.Text = T("dll.installed");
-            var installedText = "EFF v" + state.Version;
+            var installedText = "EFF v" + (installedVersion?.ToString() ?? state.Version);
             if (DateTimeOffset.TryParse(state.InstalledAt, out var installedAt)) installedText += " · " + installedAt.ToLocalTime().ToString("yyyy-MM-dd");
             DllVersionText.Text = installedText;
             UninstallDllButton.IsEnabled = true;
@@ -185,7 +188,7 @@ public partial class MainWindow : Window
         else if (File.Exists(dllFile))
         {
             DllStateText.Text = T("dll.unknown");
-            DllVersionText.Text = dllFile;
+            DllVersionText.Text = installedVersion is null ? dllFile : "EFF v" + installedVersion;
             UninstallDllButton.IsEnabled = false;
         }
         else
@@ -196,25 +199,36 @@ public partial class MainWindow : Window
         }
 
         LatestDllText.Text = _latestDll?.ToString() ?? "—";
-        if (_latestDll is not null && state is not null && Version.TryParse(state.Version, out var installed) && _latestDll > installed)
+        if (_latestDll is not null && installedVersion is not null && _latestDll > installedVersion)
             DllVersionText.Text += "   ·   " + T("status.updateAvailable");
     }
 
-    private async void InstallDll_Click(object sender, RoutedEventArgs e)
+    private async void InstallDll_Click(object sender, RoutedEventArgs e) => await ExecuteAsync(InstallLatestDllAsync);
+
+    private Task InstallLatestDllAsync() => InstallLatestDllAsync(ignoreDeclinedUnmanaged: false);
+
+    private async Task InstallLatestDllAsync(bool ignoreDeclinedUnmanaged)
     {
-        await ExecuteAsync(async () =>
+        if (!EnsureGame()) return;
+        if (File.Exists(Path.Combine(GamePath, "plugin", "eff.dll")) && !DllInstallService.IsManaged(GamePath))
         {
-            if (!EnsureGame()) return;
-            if (File.Exists(Path.Combine(GamePath, "plugin", "eff.dll")) && !DllInstallService.IsManaged(GamePath))
+            var result = MessageBox.Show(this, T("dialog.unmanagedDll"), T("dialog.title"), MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            if (result != MessageBoxResult.Yes)
             {
-                var result = MessageBox.Show(this, T("dialog.unmanagedDll"), T("dialog.title"), MessageBoxButton.YesNo, MessageBoxImage.Warning);
-                if (result != MessageBoxResult.Yes) return;
+                if (ignoreDeclinedUnmanaged && _latestDll is not null)
+                {
+                    _settings.IgnoredDllVersion = _latestDll.ToString();
+                    SettingsStore.Save(_settings);
+                }
+                return;
             }
-            var progress = new Progress<string>(SetStatus);
-            var version = await DllInstallService.InstallOrUpdateAsync(GamePath, progress, _shutdown.Token);
-            SetStatus(T("status.dllInstalled") + " · v" + version);
-            RefreshDllState();
-        });
+        }
+        var progress = new Progress<string>(SetStatus);
+        var version = await DllInstallService.InstallOrUpdateAsync(GamePath, progress, _shutdown.Token);
+        _settings.IgnoredDllVersion = "";
+        SettingsStore.Save(_settings);
+        SetStatus(T("status.dllInstalled") + " · v" + version);
+        RefreshDllState();
     }
 
     private async void UninstallDll_Click(object sender, RoutedEventArgs e)
@@ -225,6 +239,8 @@ public partial class MainWindow : Window
             var result = MessageBox.Show(this, T("dialog.uninstallDll"), T("dialog.title"), MessageBoxButton.YesNo, MessageBoxImage.Warning);
             if (result != MessageBoxResult.Yes) return Task.CompletedTask;
             var outcome = DllInstallService.Uninstall(GamePath);
+            _settings.IgnoredDllVersion = "";
+            SettingsStore.Save(_settings);
             RefreshDllState();
             SetStatus(T("status.dllRemoved") + (outcome == "Removed" ? "" : " · " + outcome));
             return Task.CompletedTask;
@@ -278,23 +294,57 @@ public partial class MainWindow : Window
             else if (result.Manager.Version > ManagerUpdateService.CurrentVersion)
             {
                 ManagerVersionText.Text = "v" + ManagerUpdateService.CurrentVersion.ToString(3) + " → v" + result.Manager.Version;
-                var choice = MessageBox.Show(this,
-                    string.Format(T("dialog.managerUpdate"), result.Manager.Version),
-                    T("dialog.title"), MessageBoxButton.YesNo, MessageBoxImage.Information);
-                if (choice == MessageBoxResult.Yes)
+                if (!automatic || !string.Equals(_settings.IgnoredManagerVersion, result.Manager.Version.ToString(), StringComparison.OrdinalIgnoreCase))
                 {
-                    SetStatus(T("status.managerUpdating"));
-                    var progress = new Progress<string>(SetStatus);
-                    await ManagerUpdateService.UpdateAndRestartAsync(result.Manager.Asset, result.Manager.Version, progress, _shutdown.Token);
-                    Close();
-                    return;
+                    var choice = MessageBox.Show(this,
+                        string.Format(T("dialog.managerUpdate"), result.Manager.Version),
+                        T("dialog.title"), MessageBoxButton.YesNo, MessageBoxImage.Information);
+                    if (choice == MessageBoxResult.Yes)
+                    {
+                        SetStatus(T("status.managerUpdating"));
+                        var progress = new Progress<string>(SetStatus);
+                        await ManagerUpdateService.UpdateAndRestartAsync(result.Manager.Asset, result.Manager.Version, progress, _shutdown.Token);
+                        Close();
+                        return;
+                    }
+                    _settings.IgnoredManagerVersion = result.Manager.Version.ToString();
+                    SettingsStore.Save(_settings);
                 }
             }
             else ManagerVersionText.Text = "v" + ManagerUpdateService.CurrentVersion.ToString(3) + " · " + T("status.upToDate");
 
-            var installed = HasGame ? DllInstallService.ReadState(GamePath)?.Version : null;
-            var dllUpdateAvailable = _latestDll is not null && (installed is null || !Version.TryParse(installed, out var currentDll) || currentDll < _latestDll);
-            SetStatus(dllUpdateAvailable ? T("status.updateAvailable") + " · EFF v" + _latestDll : T("status.updatesChecked"));
+            var dllPath = HasGame ? Path.Combine(GamePath, "plugin", "eff.dll") : "";
+            var hasInstalledDll = dllPath.Length > 0 && File.Exists(dllPath);
+            var installedDll = hasInstalledDll ? DllInstallService.InstalledVersion(GamePath) : null;
+            var dllUpdateAvailable = hasInstalledDll && _latestDll is not null && (installedDll is null || installedDll < _latestDll);
+            if (dllUpdateAvailable && _latestDll is not null)
+            {
+                var updateVersion = _latestDll;
+                if (!automatic || !string.Equals(_settings.IgnoredDllVersion, updateVersion.ToString(), StringComparison.OrdinalIgnoreCase))
+                {
+                    var currentVersion = installedDll?.ToString() ?? T("status.versionUnknown");
+                    var choice = MessageBox.Show(this,
+                        string.Format(T("dialog.dllUpdate"), currentVersion, updateVersion),
+                        T("dialog.title"), MessageBoxButton.YesNo, MessageBoxImage.Information);
+                    if (choice == MessageBoxResult.Yes)
+                    {
+                        await ExecuteAsync(() => InstallLatestDllAsync(ignoreDeclinedUnmanaged: true));
+                        return;
+                    }
+                    _settings.IgnoredDllVersion = updateVersion.ToString();
+                    SettingsStore.Save(_settings);
+                }
+                SetStatus(T("status.updateAvailable") + " · EFF v" + updateVersion);
+            }
+            else
+            {
+                if (_latestDll is not null && installedDll is not null && installedDll >= _latestDll && _settings.IgnoredDllVersion.Length > 0)
+                {
+                    _settings.IgnoredDllVersion = "";
+                    SettingsStore.Save(_settings);
+                }
+                SetStatus(T("status.updatesChecked"));
+            }
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
         catch (Exception error)

@@ -8,6 +8,8 @@ internal sealed class AppSettings
     public string GamePath { get; set; } = "";
     public string ResourceRoot { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EFF", "Resources");
     public bool English { get; set; }
+    public string IgnoredManagerVersion { get; set; } = "";
+    public string IgnoredDllVersion { get; set; } = "";
 }
 
 internal sealed class ModEntry : INotifyPropertyChanged

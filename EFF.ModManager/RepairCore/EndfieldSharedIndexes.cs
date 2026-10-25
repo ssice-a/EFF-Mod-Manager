@@ -55,7 +55,8 @@ internal static class EndfieldSharedIndexes
 
     internal static string FindCurrent(EndfieldVfsArchive archive, CancellationToken token, params string[] additional)
     {
-        foreach (var workspace in Workspaces(Game(archive)).Concat(additional).Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (var workspace in Workspaces(Game(archive)).Concat(new[] { Root }).Concat(additional)
+            .Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             token.ThrowIfCancellationRequested();
             try

@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Diagnostics;
 using System.Net;
 using System.Text.Json;
 using AnimeStudio.GUI;
@@ -13,6 +14,8 @@ Directory.CreateDirectory(Path.GetDirectoryName(input)!);
 
 try
 {
+    VerifyUnpackedWorkspaceLookup(fixture);
+    VerifyExternalDllVersionDetection(fixture);
     await VerifyHistoricalIndexLookupAsync();
     Directory.CreateDirectory(Path.Combine(game, "Endfield_Data"));
     File.WriteAllText(Path.Combine(game, "Endfield.exe"), "game");
@@ -28,6 +31,16 @@ try
     if (args.Contains("--github-repair"))
     {
         await VerifyOfficialRepairAssetAsync(fixture);
+        return;
+    }
+    if (args.Contains("--github-updates"))
+    {
+        await VerifyOfficialUpdateChecksAsync(fixture);
+        return;
+    }
+    if (args.Contains("--live-repair"))
+    {
+        await VerifyLiveRepairAsync(fixture);
         return;
     }
 
@@ -82,6 +95,53 @@ finally
 }
 
 static ModEntry Single(IEnumerable<ModEntry> items) => items.Single();
+static void VerifyExternalDllVersionDetection(string fixtureRoot)
+{
+    var game = Path.Combine(fixtureRoot, "external-dll-game");
+    var plugin = Path.Combine(game, "plugin");
+    Directory.CreateDirectory(plugin);
+    var source = typeof(GameDiscovery).Assembly.Location;
+    var dll = Path.Combine(plugin, "eff.dll");
+    File.Copy(source, dll);
+    var metadata = FileVersionInfo.GetVersionInfo(source);
+    var rawVersion = metadata.ProductVersion;
+    if (!Version.TryParse(rawVersion?.Split('+', '-', ' ')[0], out var parsed))
+        throw new InvalidOperationException("The test assembly has no parseable product version.");
+    var expected = new Version(parsed.Major, Math.Max(parsed.Minor, 0), Math.Max(parsed.Build, 0));
+    var installed = DllInstallService.InstalledVersion(game);
+    if (installed != expected)
+        throw new InvalidOperationException("An externally installed DLL version was not detected from file metadata.");
+
+    var settings = new AppSettings { IgnoredManagerVersion = "0.1.1", IgnoredDllVersion = "1.9.0" };
+    var restored = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(settings))!;
+    if (restored.IgnoredManagerVersion != settings.IgnoredManagerVersion || restored.IgnoredDllVersion != settings.IgnoredDllVersion)
+        throw new InvalidOperationException("Ignored update versions did not survive settings serialization.");
+    Console.WriteLine("PASS: external DLL version detection and ignored-update settings persistence.");
+}
+
+static void VerifyUnpackedWorkspaceLookup(string fixtureRoot)
+{
+    var previousRoot = Environment.GetEnvironmentVariable("EFF_RESOURCE_ROOT");
+    var unpackedWorkspace = Path.Combine(fixtureRoot, "unpacked-workspace");
+    var indexDirectory = Path.Combine(unpackedWorkspace, "index");
+    Directory.CreateDirectory(indexDirectory);
+    File.WriteAllText(Path.Combine(indexDirectory, "endfield_assets.eidx"), "test index");
+    File.WriteAllText(Path.Combine(indexDirectory, "endfield-index-manifest.json"), "{}");
+    Environment.SetEnvironmentVariable("EFF_RESOURCE_ROOT", unpackedWorkspace);
+    try
+    {
+        var archive = new EndfieldVfsArchive { GameDirectory = Path.Combine(fixtureRoot, "game"), VfsRoot = fixtureRoot };
+        var found = EndfieldSharedIndexes.FindCurrent(archive, CancellationToken.None);
+        if (!string.Equals(found, unpackedWorkspace, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The configured resource root was not searched as an unpacked index workspace.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("EFF_RESOURCE_ROOT", previousRoot);
+    }
+    Console.WriteLine("PASS: configured resource root is recognized as an unpacked index workspace.");
+}
+
 static async Task VerifyHistoricalIndexLookupAsync()
 {
     static IndexDownload Index(string version, char hash)
@@ -195,6 +255,104 @@ static async Task VerifyOfficialRepairAssetAsync(string fixtureRoot)
     Console.WriteLine("PASS: EFF Release " + release.tag_name + " Repair v" + version + " asset SHA-256 and compiler payload.");
 }
 
+static async Task VerifyOfficialUpdateChecksAsync(string fixtureRoot)
+{
+    var dllVersion = await DllInstallService.GetLatestVersionAsync(CancellationToken.None)
+        ?? throw new InvalidOperationException("EFF Releases has no recognizable DLL update asset.");
+    var manager = await ManagerUpdateService.CheckAsync(CancellationToken.None);
+    Console.WriteLine("PASS: GitHub update check found EFF v" + dllVersion + ".");
+    if (manager.Release is null)
+    {
+        Console.WriteLine("INFO: manager update check reached GitHub, but the repository has no Latest Release to download.");
+        return;
+    }
+    if (manager.Asset is null || manager.Version is null)
+    {
+        Console.WriteLine("INFO: manager release " + manager.Release.tag_name + " has no matching Windows update package.");
+        return;
+    }
+
+    var package = Path.Combine(fixtureRoot, manager.Asset.name);
+    var digest = await GitHubReleaseService.DownloadVerifiedAsync(manager.Asset, package, null, CancellationToken.None);
+    using var archive = ZipFile.OpenRead(package);
+    var paths = archive.Entries.Select(entry => entry.FullName.Replace('\\', '/')).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if (!paths.Contains("EFF.ModManager.exe") || !paths.Contains("native/eff_resource_pack.exe"))
+        throw new InvalidOperationException("The manager update package is missing the app or repair compiler.");
+    Console.WriteLine("PASS: manager v" + manager.Version + " update package size/SHA-256 and required payload (" + digest + ").");
+}
+
+static async Task VerifyLiveRepairAsync(string fixtureRoot)
+{
+    var settings = SettingsStore.Load();
+    var game = Path.GetFullPath(settings.GamePath);
+    var resourceRoot = Path.GetFullPath(settings.ResourceRoot);
+    var originalMod = Path.Combine(ModService.ModsRoot(game), "LZY");
+    if (!GameDiscovery.IsGame(game) || !Directory.Exists(originalMod))
+        throw new InvalidOperationException("The configured game or LZY test Mod was not found.");
+
+    var workspace = Path.Combine(fixtureRoot, "repair-workspace");
+    var workspaceIndex = Path.Combine(workspace, "index");
+    Directory.CreateDirectory(workspaceIndex);
+    foreach (var name in new[] { "endfield_assets.eidx", "endfield_assets.eidx.bundles", "endfield-index-manifest.json" })
+        File.Copy(Path.Combine(resourceRoot, "index", name), Path.Combine(workspaceIndex, name));
+
+    var modCopy = Path.Combine(fixtureRoot, "repair-mod", "LZY");
+    CopyDirectoryForTest(originalMod, modCopy);
+    var compiler = Path.Combine(AppContext.BaseDirectory, "native", "eff_resource_pack.exe");
+    if (!File.Exists(compiler)) throw new FileNotFoundException("The repair compiler was not copied to the test output.", compiler);
+
+    var appAssemblyPath = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "EFF.ModManager", "bin", "Release", "net9.0-windows", "EFF.ModManager.dll"));
+    var app = System.Reflection.Assembly.LoadFrom(appAssemblyPath);
+    var archiveType = app.GetType("AnimeStudio.GUI.EndfieldVfsArchive", throwOnError: true)!;
+    var archive = archiveType.GetMethod("Open", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!
+        .Invoke(null, [game])!;
+    var builder = app.GetType("AnimeStudio.GUI.EndfieldVfsAssetIndexBuilder", throwOnError: true)!;
+    var bind = builder.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+        .Single(method => method.Name == "TryGetOrRebindCurrentIndex" && method.GetParameters().Length == 4);
+    var bindArguments = new object?[] { archive, workspace, null, CancellationToken.None };
+    if (!(bool)bind.Invoke(null, bindArguments)!)
+        throw new InvalidOperationException("The copied unpacker index cannot be bound to the installed game's Bundle content.");
+
+    var stateMethod = app.GetType("EffRepair.RepairService", throwOnError: true)!
+        .GetMethod("StatePath", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+    var receipt = (string)stateMethod.Invoke(null, [modCopy])!;
+    var receiptExisted = File.Exists(receipt);
+    var progressLines = new List<string>();
+    var progress = new InlineProgress<string>(progressLines.Add);
+    var repairService = app.GetType("EffModManager.IntegratedRepairService", throwOnError: true)!;
+    var repair = repairService.GetMethod("RepairAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+    var task = (Task)repair.Invoke(null, [game, workspace, new[] { modCopy }, progress, CancellationToken.None])!;
+    try
+    {
+        await task;
+        var result = task.GetType().GetProperty("Result")!.GetValue(task)!;
+        var repaired = (int)result.GetType().GetProperty("Repaired")!.GetValue(result)!;
+        var failed = (int)result.GetType().GetProperty("Failed")!.GetValue(result)!;
+        if (repaired != 1 || failed != 0 || !File.Exists(Path.Combine(modCopy, "compiled.bin")) || !File.Exists(Path.Combine(modCopy, "source-inputs.bin")))
+            throw new InvalidOperationException("Integrated repair did not complete successfully: " + string.Join(" | ", progressLines.Where(line => !line.Contains("COMPILED-MOD-COST", StringComparison.Ordinal))));
+        Console.WriteLine("PASS: integrated repair regenerated a copied LZY Mod from the copied unpacker index; the installed Mod was left untouched.");
+    }
+    finally
+    {
+        if (!receiptExisted && File.Exists(receipt)) File.Delete(receipt);
+    }
+}
+
+static void CopyDirectoryForTest(string source, string destination)
+{
+    if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0)
+        throw new IOException("The live repair test refuses to copy a reparse point: " + source);
+    Directory.CreateDirectory(destination);
+    foreach (var entry in Directory.EnumerateFileSystemEntries(source))
+    {
+        if ((File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0)
+            throw new IOException("The live repair test refuses to copy a reparse point: " + entry);
+        var target = Path.Combine(destination, Path.GetFileName(entry));
+        if (Directory.Exists(entry)) CopyDirectoryForTest(entry, target);
+        else File.Copy(entry, target);
+    }
+}
+
 sealed class HttpRouteHandler(Dictionary<string, Func<HttpResponseMessage>> routes) : HttpMessageHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -203,4 +361,9 @@ sealed class HttpRouteHandler(Dictionary<string, Func<HttpResponseMessage>> rout
             throw new InvalidOperationException("Unexpected HTTP request: " + request.RequestUri);
         return Task.FromResult(response());
     }
+}
+
+sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+{
+    public void Report(T value) => report(value);
 }
