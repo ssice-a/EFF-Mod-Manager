@@ -12,14 +12,10 @@ using System.Threading.Tasks;
 
 namespace AnimeStudio.GUI;
 
-internal sealed record IndexDownload(EndfieldIndexRelease Release, string Url);
-// Keep the published catalog schema compatible with EFF Repair.
-internal sealed record RepairCatalog(string Format, string ToolVersion, string ToolUrl, IndexDownload[] Indexes);
-
 internal static class EndfieldIndexUpdates
 {
     internal static string DefaultSource => Environment.GetEnvironmentVariable("EFF_INDEX_CATALOG") is { Length: > 0 } source
-        ? source : "https://api.github.com/repos/ssice-a/EFF/releases/latest";
+        ? source : "https://api.github.com/repos/ssice-a/EFF/releases?per_page=100";
     private static readonly HttpClient Client = CreateClient();
     private static HttpClient CreateClient()
     {
@@ -31,22 +27,69 @@ internal static class EndfieldIndexUpdates
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
             throw new IOException("更新源或下载地址必须使用 HTTPS");return uri;
     }
-    internal static async Task<RepairCatalog> Check(string source, CancellationToken token, HttpClient client = null)
+    internal static async Task<IndexDownload> Find(string source, string gameContent, CancellationToken token, HttpClient client = null)
     {
         client ??= Client;
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);timeout.CancelAfter(TimeSpan.FromSeconds(15));
-        using var response = await client.GetAsync(Https(source), timeout.Token).ConfigureAwait(false);
-        if (response.StatusCode == HttpStatusCode.NotFound) return null;
-        response.EnsureSuccessStatusCode();using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token).ConfigureAwait(false));
-        var root = document.RootElement;
-        if (root.TryGetProperty("assets", out var assets))
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        var page = Https(source);
+        var catalogs = new List<RepairCatalog>();
+        while (page != null)
         {
-            var asset = assets.EnumerateArray().FirstOrDefault(a => a.GetProperty("name").GetString() == "eff-index-catalog.json");
-            if (asset.ValueKind == JsonValueKind.Undefined) return null;
-            using var catalog = await client.GetAsync(Https(asset.GetProperty("browser_download_url").GetString()), timeout.Token).ConfigureAwait(false);
-            catalog.EnsureSuccessStatusCode();return Parse(await catalog.Content.ReadAsStringAsync(timeout.Token).ConfigureAwait(false));
+            using var response = await client.GetAsync(page, timeout.Token).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.NotFound) return null;
+            response.EnsureSuccessStatusCode();
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token).ConfigureAwait(false));
+            var root = document.RootElement;
+
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var release in root.EnumerateArray())
+                {
+                    timeout.Token.ThrowIfCancellationRequested();
+                    var catalog = await ReadReleaseCatalogAsync(release, client, timeout.Token).ConfigureAwait(false);
+                    if (catalog == null) continue;
+                    catalogs.Add(catalog);
+                    var match = RepairCatalogLookup.Find(catalogs, gameContent);
+                    if (match != null) return match;
+                }
+                page = NextPage(response, page);
+                continue;
+            }
+
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("assets", out _))
+            {
+                var catalog = await ReadReleaseCatalogAsync(root, client, timeout.Token).ConfigureAwait(false);
+                return catalog == null ? null : RepairCatalogLookup.Find([catalog], gameContent);
+            }
+
+            return RepairCatalogLookup.Find([Parse(root.GetRawText())], gameContent);
         }
-        return Parse(root.GetRawText());
+        return null;
+    }
+
+    private static async Task<RepairCatalog> ReadReleaseCatalogAsync(JsonElement release, HttpClient client, CancellationToken token)
+    {
+        if (!release.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array) return null;
+        var asset = assets.EnumerateArray().FirstOrDefault(a => a.GetProperty("name").GetString() == "eff-index-catalog.json");
+        if (asset.ValueKind == JsonValueKind.Undefined) return null;
+        using var response = await client.GetAsync(Https(asset.GetProperty("browser_download_url").GetString()), token).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        return Parse(await response.Content.ReadAsStringAsync(token).ConfigureAwait(false));
+    }
+
+    private static Uri NextPage(HttpResponseMessage response, Uri current)
+    {
+        if (!response.Headers.TryGetValues("Link", out var values)) return null;
+        foreach (var part in string.Join(",", values).Split(','))
+        {
+            if (!part.Contains("rel=\"next\"", StringComparison.OrdinalIgnoreCase)) continue;
+            var start = part.IndexOf('<');
+            var end = part.IndexOf('>', start + 1);
+            if (start < 0 || end <= start + 1 || !Uri.TryCreate(part[(start + 1)..end], UriKind.Absolute, out var next)) return null;
+            return next.Scheme == Uri.UriSchemeHttps && string.Equals(next.Host, current.Host, StringComparison.OrdinalIgnoreCase)
+                ? next : null;
+        }
+        return null;
     }
     internal static RepairCatalog Parse(string json)
     {

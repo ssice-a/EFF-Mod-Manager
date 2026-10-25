@@ -1,4 +1,7 @@
 using System.IO.Compression;
+using System.Net;
+using System.Text.Json;
+using AnimeStudio.GUI;
 using EffModManager;
 
 var fixture = Path.Combine(Path.GetTempPath(), "effmm-tests-" + Guid.NewGuid().ToString("N"));
@@ -10,6 +13,7 @@ Directory.CreateDirectory(Path.GetDirectoryName(input)!);
 
 try
 {
+    await VerifyHistoricalIndexLookupAsync();
     Directory.CreateDirectory(Path.Combine(game, "Endfield_Data"));
     File.WriteAllText(Path.Combine(game, "Endfield.exe"), "game");
     File.WriteAllText(Path.Combine(game, "GameAssembly.dll"), "assembly");
@@ -78,6 +82,54 @@ finally
 }
 
 static ModEntry Single(IEnumerable<ModEntry> items) => items.Single();
+static async Task VerifyHistoricalIndexLookupAsync()
+{
+    static IndexDownload Index(string version, char hash)
+    {
+        var content = "EFF_BUNDLE_CONTENT/1:" + new string(hash, 64);
+        return new(new EndfieldIndexRelease("EFF_INDEX_RELEASE/1", version, content, version + ".effindex.gz",
+            10, new string('A', 64), 100, new string('B', 64)), "https://github.com/ssice-a/EFF/releases/download/test/index.gz");
+    }
+
+    var current = Index("20261022", 'C');
+    var historical = Index("20261017", 'F');
+    var latestCatalog = new RepairCatalog("EFF_REPAIR_CATALOG/1", "0.3.0", "", [current]);
+    var historicalCatalog = new RepairCatalog("EFF_REPAIR_CATALOG/1", "0.2.0", "", [historical]);
+    const string source = "https://api.github.com/repos/ssice-a/EFF/releases?per_page=100";
+    const string nextPage = "https://api.github.com/repos/ssice-a/EFF/releases?per_page=100&page=2";
+    const string latestCatalogUrl = "https://github.com/ssice-a/EFF/releases/download/v1.9.0/eff-index-catalog.json";
+    const string historicalCatalogUrl = "https://github.com/ssice-a/EFF/releases/download/v1.8.1/eff-index-catalog.json";
+    var releases = JsonSerializer.Serialize(new[]
+    {
+        new { assets = new[] { new { name = "eff-index-catalog.json", browser_download_url = latestCatalogUrl } } }
+    });
+    var olderReleases = JsonSerializer.Serialize(new[]
+    {
+        new { assets = new[] { new { name = "eff-index-catalog.json", browser_download_url = historicalCatalogUrl } } }
+    });
+    var routes = new Dictionary<string, Func<HttpResponseMessage>>(StringComparer.OrdinalIgnoreCase)
+    {
+        [source] = () => Response(releases, "<" + nextPage + ">; rel=\"next\""),
+        [nextPage] = () => Response(olderReleases),
+        [latestCatalogUrl] = () => Response(JsonSerializer.Serialize(latestCatalog)),
+        [historicalCatalogUrl] = () => Response(JsonSerializer.Serialize(historicalCatalog))
+    };
+    using var client = new HttpClient(new HttpRouteHandler(routes));
+    var match = await EndfieldIndexUpdates.Find(source, historical.Release.GameContent, CancellationToken.None, client);
+    if (match != historical) throw new InvalidOperationException("An index from an older EFF Release was not selected.");
+    var missing = await EndfieldIndexUpdates.Find(source, "EFF_BUNDLE_CONTENT/1:" + new string('0', 64), CancellationToken.None, client);
+    if (missing != null)
+        throw new InvalidOperationException("A game without a published matching index was incorrectly matched.");
+    Console.WriteLine("PASS: paginated historical EFF Release index lookup and strict game-content matching.");
+}
+
+static HttpResponseMessage Response(string json, string? link = null)
+{
+    var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json) };
+    if (link != null) response.Headers.Add("Link", link);
+    return response;
+}
+
 static void Equal(string expected, string actual, string label)
 {
     if (!string.Equals(expected, actual, StringComparison.Ordinal)) throw new InvalidOperationException(label + ": expected '" + expected + "', got '" + actual + "'.");
@@ -135,4 +187,14 @@ static async Task VerifyOfficialRepairAssetAsync(string fixtureRoot)
     if (!paths.Contains("EFF.Repair.exe") || !paths.Contains("native/eff_resource_pack.exe"))
         throw new InvalidOperationException("The official Repair package is missing its app or compiler.");
     Console.WriteLine("PASS: EFF Release " + release.tag_name + " Repair v" + version + " asset SHA-256 and compiler payload.");
+}
+
+sealed class HttpRouteHandler(Dictionary<string, Func<HttpResponseMessage>> routes) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (request.RequestUri == null || !routes.TryGetValue(request.RequestUri.AbsoluteUri, out var response))
+            throw new InvalidOperationException("Unexpected HTTP request: " + request.RequestUri);
+        return Task.FromResult(response());
+    }
 }

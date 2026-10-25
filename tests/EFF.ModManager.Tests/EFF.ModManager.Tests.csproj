@@ -12,5 +12,7 @@
     <Compile Include="../../EFF.ModManager/GitHubReleaseService.cs" Link="GitHubReleaseService.cs" />
     <Compile Include="../../EFF.ModManager/DllInstallService.cs" Link="DllInstallService.cs" />
     <Compile Include="../../EFF.ModManager/GameDiscovery.cs" Link="GameDiscovery.cs" />
+    <Compile Include="../../EFF.ModManager/RepairCore/RepairCatalog.cs" Link="RepairCatalog.cs" />
+    <Compile Include="../../EFF.ModManager/RepairCore/EndfieldIndexUpdates.cs" Link="EndfieldIndexUpdates.cs" />
   </ItemGroup>
 </Project>

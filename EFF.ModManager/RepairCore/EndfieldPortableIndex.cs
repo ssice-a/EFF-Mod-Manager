@@ -11,9 +11,6 @@ using System.Threading;
 
 namespace AnimeStudio.GUI;
 
-internal sealed record EndfieldIndexRelease(string Format, string Version, string GameContent,
-    string File, long Bytes, string Sha256, long IndexBytes, string IndexSha256);
-
 // The public payload carries content proofs, never a publisher's local workspace.
 internal static class EndfieldPortableIndex
 {
