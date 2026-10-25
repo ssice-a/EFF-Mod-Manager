@@ -10,6 +10,12 @@ Directory.CreateDirectory(Path.GetDirectoryName(input)!);
 
 try
 {
+    Directory.CreateDirectory(Path.Combine(game, "Endfield_Data"));
+    File.WriteAllText(Path.Combine(game, "Endfield.exe"), "game");
+    File.WriteAllText(Path.Combine(game, "GameAssembly.dll"), "assembly");
+    if (!GameDiscovery.IsGame(game) || DllInstallService.IsManaged(game))
+        throw new InvalidOperationException("A valid game without a manager-installed EFF DLL was rejected.");
+
     if (args.Contains("--github-dll"))
     {
         await VerifyOfficialDllInstallAsync(fixture);

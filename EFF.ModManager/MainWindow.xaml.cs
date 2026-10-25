@@ -41,7 +41,8 @@ public partial class MainWindow : Window
     {
         try
         {
-            var matches = await Task.Run(() => GameDiscovery.Find(_settings.GamePath), _shutdown.Token);
+            var savedGamePath = _settings.GamePath;
+            var matches = await Task.Run(() => GameDiscovery.Find(savedGamePath), _shutdown.Token);
             if (GameDiscovery.IsGame(_settings.GamePath)) SetGamePath(Path.GetFullPath(_settings.GamePath));
             else if (matches.Count == 1) SetGamePath(matches[0]);
             else if (matches.Count > 1) SetStatus(string.Format(T("status.multipleGames"), matches.Count));
@@ -130,9 +131,10 @@ public partial class MainWindow : Window
 
     private async void ScanGame_Click(object sender, RoutedEventArgs e)
     {
+        var savedGamePath = GamePathBox.Text.Trim().Trim('"');
         await ExecuteAsync(async () =>
         {
-            var matches = await Task.Run(() => GameDiscovery.Find(GamePathBox.Text.Trim().Trim('"')), _shutdown.Token);
+            var matches = await Task.Run(() => GameDiscovery.Find(savedGamePath), _shutdown.Token);
             if (matches.Count == 0) { SetStatus(T("status.gameMissing")); return; }
             if (matches.Count == 1) { SetGamePath(matches[0]); SetStatus(T("status.gameFound")); return; }
             var dialog = new OpenFolderDialog { Title = T("game.title"), InitialDirectory = GameDiscovery.IsGame(GamePathBox.Text) ? GamePathBox.Text : matches[0] };
@@ -451,6 +453,7 @@ public partial class MainWindow : Window
     {
         var selected = RepairModsList.Items.OfType<ModEntry>().Where(mod => mod.IsRepairSelected).Select(mod => mod.Folder).ToArray();
         if (!EnsureGame()) return;
+        var gamePath = GamePath;
         if (selected.Length == 0) { RepairStatusText.Text = T("repair.selectOne"); return; }
         var root = ResourceRootBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(root)) { RepairStatusText.Text = T("repair.chooseResources"); return; }
@@ -468,7 +471,7 @@ public partial class MainWindow : Window
             });
             try
             {
-                var result = await Task.Run(() => IntegratedRepairService.RepairAsync(GamePath, root, selected, progress, _shutdown.Token), _shutdown.Token);
+                var result = await Task.Run(() => IntegratedRepairService.RepairAsync(gamePath, root, selected, progress, _shutdown.Token), _shutdown.Token);
                 RepairStatusText.Text = string.Format(T("repair.complete"), result.Repaired, result.Failed, result.Workspace);
                 SetStatus(string.Format(T("repair.completeShort"), result.Repaired, result.Failed));
                 RefreshMods();
