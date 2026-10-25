@@ -1,0 +1,30 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - name: Publish Windows app
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          if (Test-Path publish) { Remove-Item publish -Recurse -Force }
+          dotnet publish EFF.ModManager/EFF.ModManager.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:Version=$version -o publish
+          Compress-Archive -Path publish/* -DestinationPath "EFF-Mod-Manager-v$version-win-x64.zip"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create $env:GITHUB_REF_NAME "EFF-Mod-Manager-v$($env:GITHUB_REF_NAME.TrimStart('v'))-win-x64.zip" --generate-notes
