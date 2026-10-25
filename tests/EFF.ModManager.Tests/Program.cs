@@ -118,9 +118,15 @@ static async Task VerifyHistoricalIndexLookupAsync()
     var match = await EndfieldIndexUpdates.Find(source, historical.Release.GameContent, CancellationToken.None, client);
     if (match != historical) throw new InvalidOperationException("An index from an older EFF Release was not selected.");
     var missing = await EndfieldIndexUpdates.Find(source, "EFF_BUNDLE_CONTENT/1:" + new string('0', 64), CancellationToken.None, client);
-    if (missing != null)
-        throw new InvalidOperationException("A game without a published matching index was incorrectly matched.");
-    Console.WriteLine("PASS: paginated historical EFF Release index lookup and strict game-content matching.");
+    if (missing != current)
+        throw new InvalidOperationException("The newest published index was not selected when there was no exact content match.");
+    var publishedRows = new[] { new BundleContentInfo("a.ab", new string('A', 32), 10), new BundleContentInfo("b.ab", new string('B', 32), 20) };
+    var installedRows = new[] { new BundleContentInfo("A.ab", new string('C', 32), 11), new BundleContentInfo("b.ab", new string('D', 32), 21) };
+    if (!RepairCatalogLookup.BundlePathsCompatible(publishedRows, installedRows))
+        throw new InvalidOperationException("Bundle content metadata differences blocked an otherwise compatible path set.");
+    if (RepairCatalogLookup.BundlePathsCompatible(publishedRows, [installedRows[0], new BundleContentInfo("c.ab", new string('D', 32), 21)]))
+        throw new InvalidOperationException("A different Bundle path set was accepted.");
+    Console.WriteLine("PASS: historical exact match, latest-index fallback, and Bundle-path compatibility.");
 }
 
 static HttpResponseMessage Response(string json, string? link = null)

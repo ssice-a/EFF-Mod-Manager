@@ -20,13 +20,16 @@ internal static class EndfieldPortableIndex
         .OrderBy(b => b.LogicalPath, StringComparer.OrdinalIgnoreCase).ToArray();
 
     internal static string ContentIdentity(EndfieldVfsArchive archive)
+        => ContentIdentity(Bundles(archive).Select(row => new BundleContentInfo(row.LogicalPath, row.FileDataMd5, row.Length)));
+
+    private static string ContentIdentity(IEnumerable<BundleContentInfo> bundles)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         using var stream = new MemoryStream();using var writer = new BinaryWriter(stream, Encoding.UTF8, true);
-        foreach (var row in Bundles(archive))
+        foreach (var row in bundles)
         {
             stream.SetLength(0);stream.Position = 0;
-            writer.Write(row.LogicalPath.Replace('\\', '/').ToLowerInvariant());writer.Write(row.FileDataMd5.ToUpperInvariant());writer.Write(row.Length);writer.Flush();
+            writer.Write(row.Path.Replace('\\', '/').ToLowerInvariant());writer.Write(row.FileDataMd5.ToUpperInvariant());writer.Write(row.Length);writer.Flush();
             hash.AppendData(stream.GetBuffer().AsSpan(0, (int)stream.Length));
         }
         return "EFF_BUNDLE_CONTENT/1:" + Convert.ToHexString(hash.GetHashAndReset());
@@ -58,22 +61,30 @@ internal static class EndfieldPortableIndex
         finally { if (File.Exists(temp)) File.Delete(temp); }
     }
 
-    internal static string Import(EndfieldVfsArchive archive, string workspace, string package, CancellationToken token)
+    internal static string Import(EndfieldVfsArchive archive, string workspace, string package, string expectedContent, CancellationToken token)
     {
         Directory.CreateDirectory(workspace);
         var tempRoot = Path.Combine(workspace, ".eff-index-import-" + Guid.NewGuid().ToString("N"));Directory.CreateDirectory(tempRoot);
         try
         {
             using var file = File.OpenRead(package);using var gzip = new GZipStream(file, CompressionMode.Decompress);using var reader = new BinaryReader(gzip, Encoding.UTF8, true);
-            if (reader.ReadString() != Magic || reader.ReadString() != ContentIdentity(archive)) throw new InvalidDataException("The published index does not match the installed game content");
+            var magic = reader.ReadString();var publishedContent = reader.ReadString();
+            if (magic != Magic || publishedContent != expectedContent) throw new InvalidDataException("Published index metadata does not match its catalog entry");
             long length = reader.ReadInt64();var expected = reader.ReadString();var bundles = Bundles(archive);
-            if (length < 17 || expected.Length != 64 || reader.ReadInt32() != bundles.Length) throw new InvalidDataException("Invalid public index envelope");
+            int count = reader.ReadInt32();
+            if (length < 17 || expected.Length != 64 || count != bundles.Length) throw new InvalidDataException("Invalid public index envelope");
+            var publishedBundles = new List<BundleContentInfo>(count);
+            for (var i = 0; i < count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                publishedBundles.Add(new BundleContentInfo(reader.ReadString(), reader.ReadString(), reader.ReadInt64()));
+            }
+            if (ContentIdentity(publishedBundles) != publishedContent || !RepairCatalogLookup.BundlePathsCompatible(publishedBundles,
+                bundles.Select(row => new BundleContentInfo(row.LogicalPath, row.FileDataMd5, row.Length))))
+                throw new InvalidDataException("Published Bundle paths do not match the installed game");
             foreach (var row in bundles)
             {
                 token.ThrowIfCancellationRequested();
-                if (!string.Equals(reader.ReadString(), row.LogicalPath, StringComparison.OrdinalIgnoreCase) ||
-                    !string.Equals(reader.ReadString(), row.FileDataMd5, StringComparison.OrdinalIgnoreCase) || reader.ReadInt64() != row.Length)
-                    throw new InvalidDataException("Bundle content differs: " + row.LogicalPath);
                 var size = new FileInfo(row.SourceChk).Length;
                 if (row.Offset < 0 || row.Length <= 0 || row.Offset > size || row.Length > size - row.Offset) throw new InvalidDataException("Current Bundle payload unavailable: " + row.LogicalPath);
             }

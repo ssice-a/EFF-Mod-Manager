@@ -33,6 +33,7 @@ internal static class EndfieldIndexUpdates
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);timeout.CancelAfter(TimeSpan.FromSeconds(30));
         var page = Https(source);
         var catalogs = new List<RepairCatalog>();
+        IndexDownload latest = null;
         while (page != null)
         {
             using var response = await client.GetAsync(page, timeout.Token).ConfigureAwait(false);
@@ -48,8 +49,11 @@ internal static class EndfieldIndexUpdates
                     timeout.Token.ThrowIfCancellationRequested();
                     var catalog = await ReadReleaseCatalogAsync(release, client, timeout.Token).ConfigureAwait(false);
                     if (catalog == null) continue;
+                    var candidate = RepairCatalogLookup.FindLatest([catalog]);
+                    if (candidate != null && (latest == null || StringComparer.Ordinal.Compare(candidate.Release.Version, latest.Release.Version) > 0))
+                        latest = candidate;
                     catalogs.Add(catalog);
-                    var match = RepairCatalogLookup.Find(catalogs, gameContent);
+                    var match = RepairCatalogLookup.FindExact(catalogs, gameContent);
                     if (match != null) return match;
                 }
                 page = NextPage(response, page);
@@ -59,12 +63,14 @@ internal static class EndfieldIndexUpdates
             if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("assets", out _))
             {
                 var catalog = await ReadReleaseCatalogAsync(root, client, timeout.Token).ConfigureAwait(false);
-                return catalog == null ? null : RepairCatalogLookup.Find([catalog], gameContent);
+                return catalog == null ? null : RepairCatalogLookup.FindExact([catalog], gameContent)
+                    ?? RepairCatalogLookup.FindLatest([catalog]);
             }
 
-            return RepairCatalogLookup.Find([Parse(root.GetRawText())], gameContent);
+            var directCatalog = Parse(root.GetRawText());
+            return RepairCatalogLookup.FindExact([directCatalog], gameContent) ?? RepairCatalogLookup.FindLatest([directCatalog]);
         }
-        return null;
+        return latest;
     }
 
     private static async Task<RepairCatalog> ReadReleaseCatalogAsync(JsonElement release, HttpClient client, CancellationToken token)

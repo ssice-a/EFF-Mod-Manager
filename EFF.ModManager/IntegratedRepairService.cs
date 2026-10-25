@@ -28,13 +28,15 @@ internal static class IntegratedRepairService
 
             if (!await Task.Run(() => EndfieldVfsAssetIndexBuilder.TryGetOrRebindCurrentIndex(archive, workspace, out _, token), token))
             {
-                progress?.Report("正在 GitHub 查找与当前游戏资源匹配的完整索引…");
+                progress?.Report("正在 GitHub 查找已发布的资源索引…");
                 var item = await EndfieldIndexUpdates.Find(EndfieldIndexUpdates.DefaultSource, content, token)
-                    ?? throw new IOException("仓库尚未发布匹配当前游戏资源的索引，请等待更新。");
+                    ?? throw new IOException("EFF Release 尚未发布资源索引包。");
+                if (!string.Equals(item.Release.GameContent, content, StringComparison.OrdinalIgnoreCase))
+                    progress?.Report(LanguageService.Instance["repair.indexFallback"]);
                 var package = EndfieldIndexUpdates.CachedPackage(item);
                 await EndfieldIndexUpdates.Download(item, package, progress ?? new Progress<string>(_ => { }), token);
                 progress?.Report("正在校验并导入索引…");
-                await Task.Run(() => EndfieldPortableIndex.Import(archive, workspace, package, token), token);
+                await Task.Run(() => EndfieldPortableIndex.Import(archive, workspace, package, item.Release.GameContent, token), token);
                 if (!await Task.Run(() => EndfieldSharedIndexes.TryRemember(archive, workspace, token), token))
                     progress?.Report("索引已导入；共享位置登记失败。");
             }
