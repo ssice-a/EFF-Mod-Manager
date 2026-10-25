@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 
 namespace EffModManager;
 
@@ -9,8 +10,12 @@ internal sealed class AppSettings
     public bool English { get; set; }
 }
 
-internal sealed class ModEntry
+internal sealed class ModEntry : INotifyPropertyChanged
 {
+    private bool _isRepairSelected = true;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
     public string Folder { get; init; } = "";
     public string IniPath { get; init; } = "";
     public string Id { get; init; } = "";
@@ -19,7 +24,16 @@ internal sealed class ModEntry
     public string Version { get; init; } = "";
     public string Description { get; init; } = "";
     public bool IsEnabled { get; init; }
-    public bool IsRepairSelected { get; set; } = true;
+    public bool IsRepairSelected
+    {
+        get => _isRepairSelected;
+        set
+        {
+            if (_isRepairSelected == value) return;
+            _isRepairSelected = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsRepairSelected)));
+        }
+    }
     public ObservableCollection<string> Hotkeys { get; init; } = [];
     public override string ToString() => Name;
 }

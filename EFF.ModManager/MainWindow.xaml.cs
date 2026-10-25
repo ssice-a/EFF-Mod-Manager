@@ -4,6 +4,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using DragEventArgs = System.Windows.DragEventArgs;
 
 namespace EffModManager;
@@ -16,6 +17,9 @@ public partial class MainWindow : Window
     private List<ModEntry> _allMods = [];
     private bool _initializing = true;
     private bool _busy;
+    private bool _repairSelectionSweepActive;
+    private bool _repairSelectionSweepValue;
+    private int _repairSelectionSweepLastIndex = -1;
     private Version? _latestDll;
 
     public MainWindow()
@@ -314,6 +318,7 @@ public partial class MainWindow : Window
             EmptyModsOverlay.Visibility = Visibility.Visible;
             RepairEmptyText.Visibility = Visibility.Visible;
             ClearDetails();
+            UpdateRepairSelectionToggleText();
             return;
         }
 
@@ -327,6 +332,7 @@ public partial class MainWindow : Window
         RepairModsList.ItemsSource = new ObservableCollection<ModEntry>(_allMods);
         RepairEmptyText.Visibility = _allMods.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         RepairCountText.Text = string.Format(T("repair.modCount"), _allMods.Count);
+        UpdateRepairSelectionToggleText();
         if (selected is null && _allMods.Count > 0) ModsList.SelectedIndex = 0;
         else if (_allMods.Count == 0) ClearDetails();
     }
@@ -487,8 +493,78 @@ public partial class MainWindow : Window
 
     private void SelectAllRepair_Click(object sender, RoutedEventArgs e)
     {
-        foreach (var mod in RepairModsList.Items.OfType<ModEntry>()) mod.IsRepairSelected = true;
-        RepairModsList.Items.Refresh();
+        var mods = RepairModsList.Items.OfType<ModEntry>().ToArray();
+        var selectAll = mods.Any(mod => !mod.IsRepairSelected);
+        foreach (var mod in mods) mod.IsRepairSelected = selectAll;
+        UpdateRepairSelectionToggleText();
+    }
+
+    private void RepairSelection_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not CheckBox checkbox || checkbox.DataContext is not ModEntry mod) return;
+        if (!RepairModsList.CaptureMouse()) return;
+
+        _repairSelectionSweepValue = !mod.IsRepairSelected;
+        _repairSelectionSweepActive = true;
+        _repairSelectionSweepLastIndex = RepairModsList.Items.IndexOf(mod);
+        SetRepairSelection(mod, _repairSelectionSweepValue);
+        e.Handled = true;
+    }
+
+    private void RepairModsList_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_repairSelectionSweepActive || e.LeftButton != MouseButtonState.Pressed) return;
+        var point = e.GetPosition(RepairModsList);
+        var hit = VisualTreeHelper.HitTest(RepairModsList, point)?.VisualHit;
+        var row = FindVisualAncestor<DataGridRow>(hit);
+        if (row?.Item is not ModEntry mod) return;
+
+        var index = RepairModsList.Items.IndexOf(mod);
+        if (index < 0 || _repairSelectionSweepLastIndex < 0) return;
+        var step = Math.Sign(index - _repairSelectionSweepLastIndex);
+        for (var current = _repairSelectionSweepLastIndex + step; step != 0 && current != index + step; current += step)
+            if (RepairModsList.Items[current] is ModEntry crossed) SetRepairSelection(crossed, _repairSelectionSweepValue);
+        _repairSelectionSweepLastIndex = index;
+    }
+
+    private void RepairModsList_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_repairSelectionSweepActive) return;
+        _repairSelectionSweepActive = false;
+        _repairSelectionSweepLastIndex = -1;
+        if (RepairModsList.IsMouseCaptured) RepairModsList.ReleaseMouseCapture();
+        e.Handled = true;
+    }
+
+    private void RepairModsList_LostMouseCapture(object sender, MouseEventArgs e)
+    {
+        _repairSelectionSweepActive = false;
+        _repairSelectionSweepLastIndex = -1;
+    }
+
+    private void SetRepairSelection(ModEntry mod, bool selected)
+    {
+        if (mod.IsRepairSelected == selected) return;
+        mod.IsRepairSelected = selected;
+        UpdateRepairSelectionToggleText();
+    }
+
+    private void UpdateRepairSelectionToggleText()
+    {
+        var mods = RepairModsList.Items.OfType<ModEntry>().ToArray();
+        RepairSelectionToggleText.Text = mods.Length > 0 && mods.All(mod => mod.IsRepairSelected)
+            ? T("repair.deselectAll")
+            : T("repair.selectAll");
+    }
+
+    private static T? FindVisualAncestor<T>(DependencyObject? element) where T : DependencyObject
+    {
+        while (element is not null)
+        {
+            if (element is T match) return match;
+            element = VisualTreeHelper.GetParent(element);
+        }
+        return null;
     }
 
     private void Language_Checked(object sender, RoutedEventArgs e)

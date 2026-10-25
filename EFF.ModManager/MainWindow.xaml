@@ -147,8 +147,8 @@
             <DataGrid x:Name="ModsList" Grid.Row="1" Grid.Column="0" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="False" SelectionMode="Single" SelectionUnit="FullRow" SelectionChanged="ModsList_SelectionChanged" Margin="0,0,8,0">
               <DataGrid.Columns>
                 <DataGridTemplateColumn Width="58"><DataGridTemplateColumn.Header><TextBlock Text="{Binding [mods.state], Source={x:Static local:LanguageService.Instance}}" /></DataGridTemplateColumn.Header><DataGridTemplateColumn.CellTemplate><DataTemplate><CheckBox IsChecked="{Binding IsEnabled, Mode=OneWay}" Click="ModEnabled_Click" HorizontalAlignment="Center" VerticalAlignment="Center" /></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
-                <DataGridTextColumn Width="*" Binding="{Binding Name}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.name], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
-                <DataGridTextColumn Width="125" Binding="{Binding Author}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.author], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
+                <DataGridTextColumn Width="*" Binding="{Binding Name}" ElementStyle="{StaticResource DataGridTextCell}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.name], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
+                <DataGridTextColumn Width="125" Binding="{Binding Author}" ElementStyle="{StaticResource DataGridTextCell}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.author], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
               </DataGrid.Columns>
             </DataGrid>
             <TextBlock x:Name="EmptyModsOverlay" Grid.Row="1" Grid.Column="0" Text="{Binding [mods.empty], Source={x:Static local:LanguageService.Instance}}" Foreground="{StaticResource Muted}" VerticalAlignment="Center" HorizontalAlignment="Center" IsHitTestVisible="False" Visibility="Collapsed" />
@@ -178,7 +178,7 @@
           <DockPanel Grid.Row="0" Margin="0,0,0,17">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
               <TextBlock x:Name="RepairCountText" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center" Margin="0,0,12,0" />
-              <Button Click="SelectAllRepair_Click" Content="{Binding [repair.selectAll], Source={x:Static local:LanguageService.Instance}}" />
+              <Button x:Name="RepairSelectionToggleButton" Click="SelectAllRepair_Click"><TextBlock x:Name="RepairSelectionToggleText" Text="{Binding [repair.selectAll], Source={x:Static local:LanguageService.Instance}}" /></Button>
               <Button x:Name="RepairButton" Style="{StaticResource PrimaryButton}" Margin="8,0,0,0" Click="OpenRepair_Click"><StackPanel Orientation="Horizontal"><TextBlock Text="" FontFamily="Segoe MDL2 Assets" Margin="0,0,8,0"/><TextBlock Text="{Binding [repair.run], Source={x:Static local:LanguageService.Instance}}" /></StackPanel></Button>
             </StackPanel>
             <StackPanel>
@@ -196,12 +196,12 @@
               <Button Grid.Column="1" VerticalAlignment="Bottom" Margin="9,0,0,0" Click="BrowseResources_Click" Content="{Binding [repair.browse], Source={x:Static local:LanguageService.Instance}}" />
             </Grid>
           </Border>
-          <DataGrid x:Name="RepairModsList" Grid.Row="2" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="False" SelectionUnit="FullRow" Margin="0,0,0,12">
+          <DataGrid x:Name="RepairModsList" Grid.Row="2" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="False" SelectionMode="Single" SelectionUnit="FullRow" PreviewMouseMove="RepairModsList_PreviewMouseMove" PreviewMouseLeftButtonUp="RepairModsList_PreviewMouseLeftButtonUp" LostMouseCapture="RepairModsList_LostMouseCapture" Margin="0,0,0,12">
             <DataGrid.Columns>
-              <DataGridCheckBoxColumn Width="64" Binding="{Binding IsRepairSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"><DataGridCheckBoxColumn.Header><TextBlock Text="{Binding [repair.select], Source={x:Static local:LanguageService.Instance}}" /></DataGridCheckBoxColumn.Header></DataGridCheckBoxColumn>
-              <DataGridTextColumn Width="*" Binding="{Binding Name}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.name], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
-              <DataGridTextColumn Width="180" Binding="{Binding Author}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.author], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
-              <DataGridTextColumn Width="130" Binding="{Binding Version}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.version], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
+              <DataGridTemplateColumn Width="64"><DataGridTemplateColumn.Header><TextBlock Text="{Binding [repair.select], Source={x:Static local:LanguageService.Instance}}" /></DataGridTemplateColumn.Header><DataGridTemplateColumn.CellTemplate><DataTemplate><CheckBox IsChecked="{Binding IsRepairSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Focusable="False" IsTabStop="False" HorizontalAlignment="Center" PreviewMouseLeftButtonDown="RepairSelection_PreviewMouseLeftButtonDown" /></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+              <DataGridTextColumn Width="*" Binding="{Binding Name}" ElementStyle="{StaticResource DataGridTextCell}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.name], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
+              <DataGridTextColumn Width="180" Binding="{Binding Author}" ElementStyle="{StaticResource DataGridTextCell}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.author], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
+              <DataGridTextColumn Width="130" Binding="{Binding Version}" ElementStyle="{StaticResource DataGridTextCell}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.version], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
             </DataGrid.Columns>
           </DataGrid>
           <TextBlock x:Name="RepairEmptyText" Grid.Row="2" Text="{Binding [mods.empty], Source={x:Static local:LanguageService.Instance}}" Foreground="{StaticResource Muted}" VerticalAlignment="Center" HorizontalAlignment="Center" IsHitTestVisible="False" Visibility="Collapsed" />
