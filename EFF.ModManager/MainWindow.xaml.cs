@@ -26,15 +26,26 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _settings = SettingsStore.Load();
+        var legacyRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EFF", "Resources");
+        var sharedRoot = SharedResources.ResourceRoot;
+        if (!string.IsNullOrWhiteSpace(sharedRoot))
+            _settings.ResourceRoot = sharedRoot;
+        else if (
+            string.Equals(Path.GetFullPath(_settings.ResourceRoot), Path.GetFullPath(legacyRoot), StringComparison.OrdinalIgnoreCase))
+            _settings.ResourceRoot = "";
+        else if (!string.IsNullOrWhiteSpace(_settings.ResourceRoot) && Directory.Exists(_settings.ResourceRoot))
+            SharedResources.SetResourceRoot(_settings.ResourceRoot);
         LanguageService.Instance.IsEnglish = _settings.English;
         ChineseRadio.IsChecked = !_settings.English;
         EnglishRadio.IsChecked = _settings.English;
         GamePathBox.Text = _settings.GamePath;
         ResourceRootBox.Text = _settings.ResourceRoot;
         SettingsResourceRootBox.Text = _settings.ResourceRoot;
+        RefreshSharedToolsStatus();
         ManagerVersionText.Text = "v" + ManagerUpdateService.CurrentVersion.ToString(3);
         _initializing = false;
         Loaded += MainWindow_Loaded;
+        Activated += MainWindow_Activated;
         Closing += (_, _) => _shutdown.Cancel();
         RefreshMods();
         RefreshDllState();
@@ -58,6 +69,26 @@ public partial class MainWindow : Window
         catch (Exception error) { SetStatus(error.Message); }
 
         _ = CheckUpdatesAsync(automatic: true);
+    }
+
+    private void MainWindow_Activated(object? sender, EventArgs e)
+    {
+        SyncSharedResourceRoot();
+        RefreshSharedToolsStatus();
+    }
+
+    private void SyncSharedResourceRoot()
+    {
+        var sharedRoot = SharedResources.ResourceRoot;
+        if (string.IsNullOrWhiteSpace(sharedRoot)) return;
+        if (!string.IsNullOrWhiteSpace(_settings.ResourceRoot) &&
+            string.Equals(Path.GetFullPath(_settings.ResourceRoot), sharedRoot, StringComparison.OrdinalIgnoreCase)) return;
+
+        _settings.ResourceRoot = sharedRoot;
+        ResourceRootBox.Text = sharedRoot;
+        if (!SettingsResourceRootBox.IsKeyboardFocusWithin)
+            SettingsResourceRootBox.Text = sharedRoot;
+        SettingsStore.Save(_settings);
     }
 
     private string T(string key) => LanguageService.Instance[key];
@@ -123,16 +154,67 @@ public partial class MainWindow : Window
         if (_initializing) return;
         var text = sender is TextBox box ? box.Text.Trim() : ResourceRootBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(text)) return;
-        _settings.ResourceRoot = text;
-        ResourceRootBox.Text = text;
-        SettingsResourceRootBox.Text = text;
-        SettingsStore.Save(_settings);
+        try
+        {
+            SharedResources.SetResourceRoot(text);
+            _settings.ResourceRoot = Path.GetFullPath(text);
+            ResourceRootBox.Text = _settings.ResourceRoot;
+            SettingsResourceRootBox.Text = _settings.ResourceRoot;
+            SettingsStore.Save(_settings);
+            RefreshSharedToolsStatus();
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        { SetStatus(error.Message); }
     }
 
     private void SettingsResourceRoot_TextChanged(object sender, TextChangedEventArgs e)
     {
         if (_initializing || ResourceRootBox is null) return;
         ResourceRootBox.Text = SettingsResourceRootBox.Text;
+    }
+
+    private void RefreshSharedToolsStatus()
+    {
+        if (SharedToolsStatus is null) return;
+        var compiler = SharedNativeTools.FindInstalledCompiler(SharedResources.ResourceRoot);
+        SharedToolsStatus.Text = compiler is null
+            ? T("settings.toolsMissing")
+            : string.Format(T("settings.toolsReady"), compiler);
+    }
+
+    private async void PrepareSharedTools_Click(object sender, RoutedEventArgs e)
+    {
+        SyncSharedResourceRoot();
+        var root = SettingsResourceRootBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            SharedToolsStatus.Text = T("settings.chooseResourceRoot");
+            return;
+        }
+
+        try
+        {
+            SharedResources.SetResourceRoot(root);
+            _settings.ResourceRoot = Path.GetFullPath(root);
+            SettingsStore.Save(_settings);
+            PrepareSharedToolsButton.IsEnabled = false;
+            SharedToolsStatus.Text = T("settings.preparingTools");
+            var compiler = await Task.Run(
+                () => SharedNativeTools.GetCompilerAsync(_settings.ResourceRoot, _shutdown.Token), _shutdown.Token);
+            SharedToolsStatus.Text = string.Format(T("settings.toolsReady"), compiler);
+            SetStatus(T("settings.toolsPrepared"));
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            SharedToolsStatus.Text = error.Message;
+            SetStatus(error.Message);
+        }
+        finally
+        {
+            PrepareSharedToolsButton.IsEnabled = true;
+            RefreshSharedToolsStatus();
+        }
     }
 
     private async void ScanGame_Click(object sender, RoutedEventArgs e)
@@ -500,9 +582,11 @@ public partial class MainWindow : Window
         var dialog = new OpenFolderDialog { Title = T("settings.resources"), InitialDirectory = Directory.Exists(ResourceRootBox.Text) ? ResourceRootBox.Text : "" };
         if (dialog.ShowDialog(this) != true) return;
         _settings.ResourceRoot = dialog.FolderName;
+        SharedResources.SetResourceRoot(dialog.FolderName);
         ResourceRootBox.Text = dialog.FolderName;
         SettingsResourceRootBox.Text = dialog.FolderName;
         SettingsStore.Save(_settings);
+        RefreshSharedToolsStatus();
     }
 
     private async void OpenRepair_Click(object sender, RoutedEventArgs e)

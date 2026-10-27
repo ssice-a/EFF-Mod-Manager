@@ -19,31 +19,15 @@ internal static class IntegratedRepairService
         {
             Environment.SetEnvironmentVariable("EFF_RESOURCE_ROOT", Path.GetFullPath(resourceRoot));
             var archive = await Task.Run(() => EndfieldVfsArchive.Open(game), token);
-            var content = await Task.Run(() => EndfieldPortableIndex.ContentIdentity(archive), token);
-            var localWorkspace = Path.Combine(SettingsStore.DataRoot, "repair", SettingsStore.GameKey(game), "workspace");
             var shared = await Task.Run(() => EndfieldSharedIndexes.FindCurrent(archive, token,
-                localWorkspace, EndfieldSharedIndexes.DefaultWorkspace(EndfieldSharedIndexes.Game(archive))), token);
+                EndfieldSharedIndexes.DefaultWorkspace(EndfieldSharedIndexes.Game(archive))), token);
             var workspace = shared ?? EndfieldSharedIndexes.DefaultWorkspace(EndfieldSharedIndexes.Game(archive));
+            if (string.IsNullOrWhiteSpace(workspace))
+                throw new IOException("没有找到 AnimeStudio 登记的索引工作区。请先在 AnimeStudio 准备索引并登记工作区；完整索引不会写入 C 盘。");
             var index = EndfieldVfsAssetIndexBuilder.GetIndexPath(workspace);
 
-            if (!await Task.Run(() => EndfieldVfsAssetIndexBuilder.TryGetOrRebindCurrentIndex(archive, workspace, out _, token), token))
-            {
-                progress?.Report("正在 GitHub 查找已发布的资源索引…");
-                var item = await EndfieldIndexUpdates.Find(EndfieldIndexUpdates.DefaultSource, content, token)
-                    ?? throw new IOException("EFF Release 尚未发布资源索引包。");
-                if (!string.Equals(item.Release.GameContent, content, StringComparison.OrdinalIgnoreCase))
-                    progress?.Report(LanguageService.Instance["repair.indexFallback"]);
-                var package = EndfieldIndexUpdates.CachedPackage(item);
-                await EndfieldIndexUpdates.Download(item, package, progress ?? new Progress<string>(_ => { }), token);
-                progress?.Report("正在校验并导入索引…");
-                await Task.Run(() => EndfieldPortableIndex.Import(archive, workspace, package, item.Release.GameContent, token), token);
-                if (!await Task.Run(() => EndfieldSharedIndexes.TryRemember(archive, workspace, token), token))
-                    progress?.Report("索引已导入；共享位置登记失败。");
-            }
-
-            if (!await Task.Run(() => EndfieldVfsAssetIndexBuilder.TryGetOrRebindCurrentIndex(archive, workspace, out _, token), token))
-                throw new IOException("当前索引无法通过游戏内容校验，未修复任何 Mod。");
-
+            var content = await Task.Run(() => EndfieldPortableIndex.ContentIdentity(archive), token);
+            var compiler = await SharedNativeTools.GetCompilerAsync(resourceRoot, token);
             var selected = mods.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             var repairProgress = new Progress<string>(value => progress?.Report(value));
             var completed = 0;
@@ -53,7 +37,7 @@ internal static class IntegratedRepairService
                 token.ThrowIfCancellationRequested();
                 try
                 {
-                    var result = await RepairService.Repair(mod, game, index, content, repairProgress, token);
+                    var result = await RepairService.Repair(mod, game, index, content, compiler, repairProgress, token);
                     progress?.Report(result);
                     completed++;
                 }

@@ -4,6 +4,7 @@ using System.Net;
 using System.Text.Json;
 using AnimeStudio.GUI;
 using EffModManager;
+using EffRepair;
 
 var fixture = Path.Combine(Path.GetTempPath(), "effmm-tests-" + Guid.NewGuid().ToString("N"));
 var game = Path.Combine(fixture, "game");
@@ -15,13 +16,18 @@ Directory.CreateDirectory(Path.GetDirectoryName(input)!);
 try
 {
     VerifyUnpackedWorkspaceLookup(fixture);
+    VerifySharedResourceSettings(fixture);
+    VerifyCompiledModCacheMigration(fixture);
     VerifyExternalDllVersionDetection(fixture);
     await VerifyHistoricalIndexLookupAsync();
     Directory.CreateDirectory(Path.Combine(game, "Endfield_Data"));
     File.WriteAllText(Path.Combine(game, "Endfield.exe"), "game");
     File.WriteAllText(Path.Combine(game, "GameAssembly.dll"), "assembly");
+    File.Copy(typeof(GameDiscovery).Assembly.Location, Path.Combine(game, "plugin", "eff.dll"));
     if (!GameDiscovery.IsGame(game) || DllInstallService.IsManaged(game))
-        throw new InvalidOperationException("A valid game without a manager-installed EFF DLL was rejected.");
+        throw new InvalidOperationException("A valid game with an externally installed EFF DLL was rejected or incorrectly marked as managed.");
+    if (DllInstallService.InstalledVersion(game) is null)
+        throw new InvalidOperationException("The external EFF DLL was not detected before Mod management.");
 
     if (args.Contains("--github-dll"))
     {
@@ -95,6 +101,31 @@ finally
 }
 
 static ModEntry Single(IEnumerable<ModEntry> items) => items.Single();
+static void VerifyCompiledModCacheMigration(string fixtureRoot)
+{
+    var mod = Path.Combine(fixtureRoot, "legacy-repair-mod");
+    Directory.CreateDirectory(Path.Combine(mod, "compiled.blocks"));
+    Directory.CreateDirectory(Path.Combine(mod, "meshes"));
+    File.WriteAllText(Path.Combine(mod, "mod.ini"), "[Mod]\nid=Legacy\n");
+    File.WriteAllText(Path.Combine(mod, "meshes", "petal.mesh"), "author mesh");
+    if (CompiledModCache.Detect(mod) != CompiledModCacheKind.Missing)
+        throw new InvalidOperationException("A package without a compiled cache was not recognized as a cold build.");
+    File.WriteAllBytes(Path.Combine(mod, "compiled.bin"), System.Text.Encoding.ASCII.GetBytes("EFF_MOD_BLOCKS/1"));
+    File.WriteAllText(Path.Combine(mod, "compiled.blocks", new string('A', 64) + ".bin"), "old generated block");
+    File.WriteAllText(Path.Combine(mod, "source-inputs.bin"), "old source routes");
+
+    if (CompiledModCache.Detect(mod) != CompiledModCacheKind.LegacyOrUnknown)
+        throw new InvalidOperationException("An EFF_MOD_BLOCKS/1 package was treated as a reusable current cache.");
+    CompiledModCache.ClearDerived(mod);
+    if (File.Exists(Path.Combine(mod, "compiled.bin")) || File.Exists(Path.Combine(mod, "source-inputs.bin")) || Directory.Exists(Path.Combine(mod, "compiled.blocks")) ||
+        !File.Exists(Path.Combine(mod, "mod.ini")) || !File.Exists(Path.Combine(mod, "meshes", "petal.mesh")))
+        throw new InvalidOperationException("Cold migration cleanup did not remove only generated package data.");
+
+    File.WriteAllBytes(Path.Combine(mod, "compiled.bin"), System.Text.Encoding.ASCII.GetBytes("EFF_MOD_BLOCKS/2"));
+    if (CompiledModCache.Detect(mod) != CompiledModCacheKind.CurrentBlockStore)
+        throw new InvalidOperationException("The current EFF_MOD_BLOCKS/2 cache was not recognized.");
+    Console.WriteLine("PASS: old compiled caches are selected for author-driven cold migration while current block stores remain reusable.");
+}
 static void VerifyExternalDllVersionDetection(string fixtureRoot)
 {
     var game = Path.Combine(fixtureRoot, "external-dll-game");
@@ -121,25 +152,100 @@ static void VerifyExternalDllVersionDetection(string fixtureRoot)
 
 static void VerifyUnpackedWorkspaceLookup(string fixtureRoot)
 {
+    var previousLocal = Environment.GetEnvironmentVariable("LOCALAPPDATA");
     var previousRoot = Environment.GetEnvironmentVariable("EFF_RESOURCE_ROOT");
     var unpackedWorkspace = Path.Combine(fixtureRoot, "unpacked-workspace");
+    var resourceRoot = Path.Combine(fixtureRoot, "shared-tools");
+    var game = Path.Combine(fixtureRoot, "game");
     var indexDirectory = Path.Combine(unpackedWorkspace, "index");
     Directory.CreateDirectory(indexDirectory);
     File.WriteAllText(Path.Combine(indexDirectory, "endfield_assets.eidx"), "test index");
     File.WriteAllText(Path.Combine(indexDirectory, "endfield-index-manifest.json"), "{}");
-    Environment.SetEnvironmentVariable("EFF_RESOURCE_ROOT", unpackedWorkspace);
+    Environment.SetEnvironmentVariable("LOCALAPPDATA", Path.Combine(fixtureRoot, "local-app-data"));
+    Environment.SetEnvironmentVariable("EFF_RESOURCE_ROOT", null);
     try
     {
-        var archive = new EndfieldVfsArchive { GameDirectory = Path.Combine(fixtureRoot, "game"), VfsRoot = fixtureRoot };
-        var found = EndfieldSharedIndexes.FindCurrent(archive, CancellationToken.None);
-        if (!string.Equals(found, unpackedWorkspace, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("The configured resource root was not searched as an unpacked index workspace.");
+        SharedResources.SetResourceRoot(resourceRoot);
+        SharedResources.SetIndexWorkspace(unpackedWorkspace);
+        var registryPath = Path.Combine(SharedResources.MetadataRoot, "registry.json");
+        File.WriteAllText(registryPath, JsonSerializer.Serialize(new
+        {
+            format = "EFF_SHARED_INDEXES/1",
+            entries = new[] { new { game, workspace = unpackedWorkspace } }
+        }));
+
+        var selected = EndfieldSharedIndexes.WorkspacePath(SharedResources.IndexWorkspace);
+        if (!string.Equals(selected, unpackedWorkspace, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The user-selected AnimeStudio index workspace was not read from shared settings.");
+        if (!EndfieldSharedIndexes.Workspaces(game).Contains(unpackedWorkspace, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The index workspace registered by AnimeStudio was not discovered by Mod Manager.");
     }
     finally
     {
+        Environment.SetEnvironmentVariable("LOCALAPPDATA", previousLocal);
         Environment.SetEnvironmentVariable("EFF_RESOURCE_ROOT", previousRoot);
     }
-    Console.WriteLine("PASS: configured resource root is recognized as an unpacked index workspace.");
+    Console.WriteLine("PASS: the shared index setting and AnimeStudio game registration are discovered independently of the tools root.");
+}
+
+static void VerifySharedResourceSettings(string fixtureRoot)
+{
+    var previousLocal = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+    var previousRoot = Environment.GetEnvironmentVariable("EFF_RESOURCE_ROOT");
+    var local = Path.Combine(fixtureRoot, "local-app-data");
+    var resourceRoot = Path.Combine(fixtureRoot, "selected-resource-root");
+    var workspace = Path.Combine(fixtureRoot, "animestudio-workspace");
+    try
+    {
+        Environment.SetEnvironmentVariable("LOCALAPPDATA", local);
+        Environment.SetEnvironmentVariable("EFF_RESOURCE_ROOT", null);
+        SharedResources.SetResourceRoot(resourceRoot);
+        if (Environment.GetEnvironmentVariable("EFF_RESOURCE_ROOT") is not null)
+            throw new InvalidOperationException("Selecting a shared resource root must not pin a process-local override.");
+        SharedResources.SetIndexWorkspace(workspace);
+        var stored = JsonDocument.Parse(File.ReadAllText(SharedResources.SettingsPath)).RootElement;
+        if (stored.GetProperty("resourceRoot").GetString() != resourceRoot ||
+            stored.GetProperty("indexWorkspace").GetString() != workspace)
+            throw new InvalidOperationException("Shared path settings did not preserve both the tools root and AnimeStudio index workspace.");
+
+        SharedResources.SetResourceRoot(Path.Combine(fixtureRoot, "updated-resource-root"));
+        if (SharedResources.ResourceRoot != Path.GetFullPath(Path.Combine(fixtureRoot, "updated-resource-root")))
+            throw new InvalidOperationException("A resource root changed by another client was not re-read from shared settings.");
+        if (SharedResources.IndexWorkspace != workspace)
+            throw new InvalidOperationException("Changing the tools root overwrote the registered AnimeStudio workspace.");
+
+        var digest = new string('a', 64);
+        var package = Path.Combine(SharedResources.ResourceRoot, "tools", digest);
+        var native = Path.Combine(package, "nativepack");
+        Directory.CreateDirectory(native);
+        Directory.CreateDirectory(Path.Combine(package, "vendor", "PIL"));
+        foreach (var name in new[] { "eff_resource_pack.exe", "eff_source_index.exe", "eff_author_core.dll", "package-protocol.json" })
+            File.WriteAllText(Path.Combine(native, name), "fixture");
+        File.WriteAllText(Path.Combine(package, "vendor", "PIL", "__init__.py"), "");
+        File.WriteAllBytes(Path.Combine(package, "vendor", "PIL", "_imaging.cp311-win_amd64.pyd"), []);
+        File.WriteAllBytes(Path.Combine(package, "vendor", "PIL", "_imaging.cp313-win_amd64.pyd"), []);
+        File.WriteAllText(Path.Combine(SharedResources.ResourceRoot, "tools", "current.json"), JsonSerializer.Serialize(new
+        {
+            format = "EFF_SHARED_NATIVE_TOOLS_INSTALL/1",
+            sha256 = digest,
+            release = "fixture"
+        }));
+        if (SharedNativeTools.FindInstalledCompiler(SharedResources.ResourceRoot) != Path.Combine(native, "eff_resource_pack.exe"))
+            throw new InvalidOperationException("Mod Manager did not discover the shared package prepared by another client.");
+
+        var index = Path.Combine(workspace, "index", "endfield_assets.eidx");
+        Directory.CreateDirectory(Path.GetDirectoryName(index)!);
+        File.WriteAllText(index, "index");
+        if (EndfieldSharedIndexes.WorkspacePath(index) != workspace ||
+            EndfieldSharedIndexes.WorkspacePath(Path.GetDirectoryName(index)!) != workspace)
+            throw new InvalidOperationException("An index file or index directory did not resolve to its AnimeStudio workspace.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("LOCALAPPDATA", previousLocal);
+        Environment.SetEnvironmentVariable("EFF_RESOURCE_ROOT", previousRoot);
+    }
+    Console.WriteLine("PASS: the selected tools root, AnimeStudio index workspace, and cross-client shared-tool cache are recognized together.");
 }
 
 static async Task VerifyHistoricalIndexLookupAsync()
@@ -276,9 +382,9 @@ static async Task VerifyOfficialUpdateChecksAsync(string fixtureRoot)
     var digest = await GitHubReleaseService.DownloadVerifiedAsync(manager.Asset, package, null, CancellationToken.None);
     using var archive = ZipFile.OpenRead(package);
     var paths = archive.Entries.Select(entry => entry.FullName.Replace('\\', '/')).ToHashSet(StringComparer.OrdinalIgnoreCase);
-    if (!paths.Contains("EFF.ModManager.exe") || !paths.Contains("native/eff_resource_pack.exe"))
-        throw new InvalidOperationException("The manager update package is missing the app or repair compiler.");
-    Console.WriteLine("PASS: manager v" + manager.Version + " update package size/SHA-256 and required payload (" + digest + ").");
+    if (!paths.Contains("EFF.ModManager.exe") || paths.Contains("native/eff_resource_pack.exe"))
+        throw new InvalidOperationException("The manager update package must contain the app and obtain the compiler from EFF shared tools.");
+    Console.WriteLine("PASS: manager v" + manager.Version + " update package size/SHA-256 without a duplicate compiler (" + digest + ").");
 }
 
 static async Task VerifyLiveRepairAsync(string fixtureRoot)
@@ -287,8 +393,11 @@ static async Task VerifyLiveRepairAsync(string fixtureRoot)
     var game = Path.GetFullPath(settings.GamePath);
     var resourceRoot = Path.GetFullPath(settings.ResourceRoot);
     var originalMod = Path.Combine(ModService.ModsRoot(game), "LZY");
-    if (!GameDiscovery.IsGame(game) || !Directory.Exists(originalMod))
-        throw new InvalidOperationException("The configured game or LZY test Mod was not found.");
+    var externalDll = Path.Combine(game, "plugin", "eff.dll");
+    if (!GameDiscovery.IsGame(game) || !Directory.Exists(originalMod) || !File.Exists(externalDll))
+        throw new InvalidOperationException("The configured game, manually installed EFF DLL, or LZY test Mod was not found.");
+    if (DllInstallService.IsManaged(game))
+        throw new InvalidOperationException("This integration test requires the EFF DLL to be installed manually, without a manager manifest.");
 
     var workspace = Path.Combine(fixtureRoot, "repair-workspace");
     var workspaceIndex = Path.Combine(workspace, "index");
@@ -298,9 +407,10 @@ static async Task VerifyLiveRepairAsync(string fixtureRoot)
 
     var modCopy = Path.Combine(fixtureRoot, "repair-mod", "LZY");
     CopyDirectoryForTest(originalMod, modCopy);
-    var compiler = Path.Combine(AppContext.BaseDirectory, "native", "eff_resource_pack.exe");
-    if (!File.Exists(compiler)) throw new FileNotFoundException("The repair compiler was not copied to the test output.", compiler);
-
+    File.WriteAllBytes(Path.Combine(modCopy, "compiled.bin"), System.Text.Encoding.ASCII.GetBytes("EFF_MOD_BLOCKS/1"));
+    File.Delete(Path.Combine(modCopy, "source-inputs.bin"));
+    var oldBlocks = Path.Combine(modCopy, "compiled.blocks");
+    if (Directory.Exists(oldBlocks)) Directory.Delete(oldBlocks, recursive: true);
     var appAssemblyPath = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "EFF.ModManager", "bin", "Release", "net9.0-windows", "EFF.ModManager.dll"));
     var app = System.Reflection.Assembly.LoadFrom(appAssemblyPath);
     var archiveType = app.GetType("AnimeStudio.GUI.EndfieldVfsArchive", throwOnError: true)!;
@@ -328,9 +438,10 @@ static async Task VerifyLiveRepairAsync(string fixtureRoot)
         var result = task.GetType().GetProperty("Result")!.GetValue(task)!;
         var repaired = (int)result.GetType().GetProperty("Repaired")!.GetValue(result)!;
         var failed = (int)result.GetType().GetProperty("Failed")!.GetValue(result)!;
-        if (repaired != 1 || failed != 0 || !File.Exists(Path.Combine(modCopy, "compiled.bin")) || !File.Exists(Path.Combine(modCopy, "source-inputs.bin")))
+        if (repaired != 1 || failed != 0 || !File.Exists(Path.Combine(modCopy, "compiled.bin")) || !File.Exists(Path.Combine(modCopy, "source-inputs.bin")) ||
+            CompiledModCache.Detect(modCopy) != CompiledModCacheKind.CurrentBlockStore)
             throw new InvalidOperationException("Integrated repair did not complete successfully: " + string.Join(" | ", progressLines.Where(line => !line.Contains("COMPILED-MOD-COST", StringComparison.Ordinal))));
-        Console.WriteLine("PASS: integrated repair regenerated a copied LZY Mod from the copied unpacker index; the installed Mod was left untouched.");
+        Console.WriteLine("PASS: integrated repair cold-migrated a copied legacy LZY package from the current index; the installed Mod was left untouched.");
     }
     finally
     {

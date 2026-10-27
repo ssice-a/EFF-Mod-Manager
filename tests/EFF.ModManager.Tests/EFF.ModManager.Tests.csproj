@@ -7,6 +7,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../EFF.ModManager/Models.cs" Link="Models.cs" />
+    <Compile Include="../../EFF.ModManager/SharedResources.cs" Link="SharedResources.cs" />
+    <Compile Include="../../EFF.ModManager/SharedNativeTools.cs" Link="SharedNativeTools.cs" />
     <Compile Include="../../EFF.ModManager/SettingsStore.cs" Link="SettingsStore.cs" />
     <Compile Include="../../EFF.ModManager/ModService.cs" Link="ModService.cs" />
     <Compile Include="../../EFF.ModManager/GitHubReleaseService.cs" Link="GitHubReleaseService.cs" />
@@ -16,6 +18,6 @@
     <Compile Include="../../EFF.ModManager/RepairCore/RepairCatalog.cs" Link="RepairCatalog.cs" />
     <Compile Include="../../EFF.ModManager/RepairCore/EndfieldIndexUpdates.cs" Link="EndfieldIndexUpdates.cs" />
     <Compile Include="../../EFF.ModManager/RepairCore/EndfieldSharedIndexes.cs" Link="EndfieldSharedIndexes.cs" />
-    <Content Include="../../EFF.ModManager/RepairCore/eff_resource_pack.exe" Link="native/eff_resource_pack.exe" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="../../EFF.ModManager/RepairCore/CompiledModCache.cs" Link="CompiledModCache.cs" />
   </ItemGroup>
 </Project>

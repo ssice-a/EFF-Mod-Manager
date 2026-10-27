@@ -6,7 +6,7 @@ namespace EffModManager;
 internal sealed class AppSettings
 {
     public string GamePath { get; set; } = "";
-    public string ResourceRoot { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EFF", "Resources");
+    public string ResourceRoot { get; set; } = "";
     public bool English { get; set; }
     public string IgnoredManagerVersion { get; set; } = "";
     public string IgnoredDllVersion { get; set; } = "";

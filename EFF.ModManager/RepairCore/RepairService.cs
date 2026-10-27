@@ -23,7 +23,6 @@ internal static class RepairService
         try { using var json = JsonDocument.Parse(File.ReadAllText(file));return json.RootElement.TryGetProperty("format", out var format) && format.GetString() == "EFF_REPAIR/1"; }
         catch (JsonException) { return false; }
     }
-    internal static string Compiler => Path.Combine(AppContext.BaseDirectory, "native", "eff_resource_pack.exe");
     internal static string Hash(string file) { using var input = File.OpenRead(file);return Convert.ToHexString(SHA256.HashData(input)); }
     internal static IEnumerable<string> Files(string root)
     {
@@ -74,9 +73,9 @@ internal static class RepairService
             }
         }
     }
-    internal static async Task<string> Run(string[] arguments, CancellationToken token)
+    internal static async Task<string> Run(string compiler, string[] arguments, CancellationToken token)
     {
-        var start = new ProcessStartInfo(Compiler) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        var start = new ProcessStartInfo(compiler) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new IOException("无法启动配套编译器");
         var stdout = process.StandardOutput.ReadToEndAsync();var stderr = process.StandardError.ReadToEndAsync();
@@ -86,9 +85,9 @@ internal static class RepairService
         if (process.ExitCode != 0) throw new IOException("编译失败，原 Mod 保持。\n" + result);
         return result;
     }
-    internal static async Task ValidateProtocol(string game, CancellationToken token)
+    internal static async Task ValidateProtocol(string game, string compiler, CancellationToken token)
     {
-        using var produced = JsonDocument.Parse((await Run(["--protocol"], token)).Trim());
+        using var produced = JsonDocument.Parse((await Run(compiler, ["--protocol"], token)).Trim());
         var declaration = Path.Combine(game, "plugin", "package-protocol.json");
         if (!File.Exists(declaration)) throw new IOException("缺少已安装 DLL 的 package-protocol.json，请安装完整配套 EFF。");
         using var consumer = JsonDocument.Parse(File.ReadAllText(declaration));
@@ -103,12 +102,18 @@ internal static class RepairService
                 throw new IOException("已安装 DLL 不支持修复输出：" + key);
         }
     }
-    internal static async Task<string> Repair(string mod, string game, string index, string content,
+    internal static async Task<string> Repair(string mod, string game, string index, string content, string compiler,
         IProgress<string>? progress, CancellationToken token)
     {
-        mod = Path.GetFullPath(mod).TrimEnd('\\');RequireGameClosed(game);await ValidateProtocol(game, token);
-        if (!File.Exists(Path.Combine(mod, "mod.ini"))) throw new IOException("不是有效 Mod：" + mod);
-        var author = AuthorIdentity(mod);var compiler = Hash(Compiler);
+        mod = Path.GetFullPath(mod).TrimEnd('\\');RequireGameClosed(game);await ValidateProtocol(game, compiler, token);
+        var cacheKind = CompiledModCache.Detect(mod);
+        if (!File.Exists(Path.Combine(mod, "mod.ini")))
+        {
+            if (cacheKind != CompiledModCacheKind.Missing)
+                throw new IOException("此 Mod 缺少 mod.ini，只有 compiled.bin 等运行缓存；这些文件不包含完整作者资源和命中声明，无法据此迁移。请恢复原始 Mod 文件或 Blender 工程。原目录未更改。");
+            throw new IOException("不是有效 Mod：" + mod);
+        }
+        var author = AuthorIdentity(mod);var compilerHash = Hash(compiler);
         // The public index is identified by logical Bundle content. Local
         // index timestamps and CHK placement do not invalidate a repaired Mod.
         var baseline = content;
@@ -118,7 +123,7 @@ internal static class RepairService
             try
             {
                 using var old = JsonDocument.Parse(File.ReadAllText(receipt));var r = old.RootElement;
-                if (r.GetProperty("baseline").GetString() == baseline && r.GetProperty("author").GetString() == author && r.GetProperty("compiler").GetString() == compiler &&
+                if (cacheKind == CompiledModCacheKind.CurrentBlockStore && r.GetProperty("baseline").GetString() == baseline && r.GetProperty("author").GetString() == author && r.GetProperty("compiler").GetString() == compilerHash &&
                     r.GetProperty("compiled").GetString() == Hash(Path.Combine(mod, "compiled.bin")) && r.GetProperty("sources").GetString() == Hash(Path.Combine(mod, "source-inputs.bin")))
                     return Path.GetFileName(mod) + "：已适配，跳过";
             }
@@ -133,12 +138,18 @@ internal static class RepairService
                 if (Path.GetRelativePath(mod, file) == Receipt && LegacyReceipt(file)) continue;
                 token.ThrowIfCancellationRequested();var target = Path.Combine(staged, Path.GetRelativePath(mod, file));Directory.CreateDirectory(Path.GetDirectoryName(target)!);File.Copy(file, target);
             }
+            if (cacheKind != CompiledModCacheKind.CurrentBlockStore)
+            {
+                CompiledModCache.ClearDerived(staged);
+                var reason = cacheKind == CompiledModCacheKind.Missing ? "没有可复用编译缓存" : "旧版或未知编译缓存";
+                progress?.Report(Path.GetFileName(mod) + "：" + reason + "，将从作者文件和当前索引冷重建");
+            }
             progress?.Report("正在修复 " + Path.GetFileName(mod));
-            var previous = mod;
+            var previous = cacheKind == CompiledModCacheKind.CurrentBlockStore ? mod : string.Empty;
             // Keep the previous descriptor together with its compiled routes.
             // Preparation will replace only the staged descriptor. A legacy
             // development receipt must not enter either strict author reader.
-            if (LegacyReceipt(Path.Combine(mod, Receipt)))
+            if (!string.IsNullOrEmpty(previous) && LegacyReceipt(Path.Combine(mod, Receipt)))
             {
                 previous = Path.Combine(temporary, "previous", Path.GetFileName(mod));Directory.CreateDirectory(previous);
                 foreach (var file in Files(staged))
@@ -146,12 +157,13 @@ internal static class RepairService
                     var target = Path.Combine(previous, Path.GetRelativePath(staged, file));Directory.CreateDirectory(Path.GetDirectoryName(target)!);File.Copy(file, target);
                 }
             }
-            var arguments = new List<string> { "--export-mod", staged, game, "--source-index", index, "--previous-mod", previous };
-            var log = await Run(arguments.ToArray(), token);
+            var arguments = new List<string> { "--export-mod", staged, game, "--source-index", index };
+            if (!string.IsNullOrEmpty(previous)) { arguments.Add("--previous-mod");arguments.Add(previous); }
+            var log = await Run(compiler, arguments.ToArray(), token);
             progress?.Report(log);
             if (!File.Exists(Path.Combine(staged, "compiled.bin")) || !File.Exists(Path.Combine(staged, "source-inputs.bin")) || author != AuthorIdentity(staged))
                 throw new InvalidDataException("修复未生成完整结果或改动了作者文件，原 Mod 保持。");
-            var record = JsonSerializer.Serialize(new { format = "EFF_REPAIR/1", baseline, author, compiler,
+            var record = JsonSerializer.Serialize(new { format = "EFF_REPAIR/1", baseline, author, compiler = compilerHash,
                 compiled = Hash(Path.Combine(staged, "compiled.bin")), sources = Hash(Path.Combine(staged, "source-inputs.bin")), repairedUtc = DateTime.UtcNow });
             token.ThrowIfCancellationRequested();RequireGameClosed(game);
             var normalized = (mod + "/compiled.bin").Replace('\\', '/');normalized = new string(normalized.Select(c => c >= 'A' && c <= 'Z' ? (char)(c + 32) : c).ToArray());
