@@ -219,7 +219,7 @@ static void VerifySharedResourceSettings(string fixtureRoot)
         var native = Path.Combine(package, "nativepack");
         Directory.CreateDirectory(native);
         Directory.CreateDirectory(Path.Combine(package, "vendor", "PIL"));
-        foreach (var name in new[] { "eff_resource_pack.exe", "eff_source_index.exe", "eff_author_core.dll", "package-protocol.json" })
+        foreach (var name in new[] { "eff_resource_pack.exe", "eff_author_assets.dll", "eff_source_index.exe", "eff_author_core.dll", "package-protocol.json" })
             File.WriteAllText(Path.Combine(native, name), "fixture");
         File.WriteAllText(Path.Combine(package, "vendor", "PIL", "__init__.py"), "");
         File.WriteAllBytes(Path.Combine(package, "vendor", "PIL", "_imaging.cp311-win_amd64.pyd"), []);
