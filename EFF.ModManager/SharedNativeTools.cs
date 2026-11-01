@@ -9,8 +9,8 @@ namespace EffModManager;
 
 internal static class SharedNativeTools
 {
-    private const string ManifestFormat = "EFF_SHARED_NATIVE_TOOLS/1";
-    private const string InstallFormat = "EFF_SHARED_NATIVE_TOOLS_INSTALL/1";
+    private const string ManifestFormat = "EFF_SHARED_NATIVE_TOOLS/3";
+    private const string InstallFormat = "EFF_SHARED_NATIVE_TOOLS_INSTALL/3";
     private const long MaxArchiveBytes = 512L * 1024 * 1024;
     private const string ReleaseApi = "https://api.github.com/repos/ssice-a/EFF/releases/latest";
     private static readonly HttpClient Client = CreateClient();
@@ -106,10 +106,13 @@ internal static class SharedNativeTools
             throw new IOException("EFF 共享工具包 SHA-256 无效。");
         if (String(value, "archiveRoot") != "EFF_Native_Tools" ||
             String(value, "compiler") != "nativepack/eff_resource_pack.exe" ||
-            String(value, "authorAssets") != "nativepack/eff_author_assets.dll" ||
             String(value, "indexUpdater") != "nativepack/eff_source_index.exe" ||
+            String(value, "authorAssets") != "nativepack/eff_author_assets.dll" ||
             String(value, "authorCore") != "nativepack/eff_author_core.dll" ||
-            String(value, "protocol") != "nativepack/package-protocol.json")
+            String(value, "protocol") != "nativepack/package-protocol.json" ||
+            String(value, "textureCompressor") != "nativepack/texconv.exe" ||
+            String(value, "legacyMigrator") != "nativepack/eff_migrate_mods.exe" ||
+            String(value, "migrationSourceExporter") != "nativepack/source-exporter/eff_migrate_sources.exe")
             throw new IOException("EFF 共享工具清单中的文件布局不受支持。");
         return new ManifestData(url, hash, bytes, release);
     }
@@ -156,8 +159,7 @@ internal static class SharedNativeTools
             var directory = Path.GetFullPath(Path.Combine(tools, receipt.Sha256.ToLowerInvariant()));
             if (!IsWithin(tools, directory)) return null;
             var native = Path.Combine(directory, "nativepack");
-            var required = new[] { "eff_resource_pack.exe", "eff_author_assets.dll", "eff_source_index.exe", "eff_author_core.dll", "package-protocol.json" };
-            return required.All(name => File.Exists(Path.Combine(native, name))) && HasPillowAbis(directory)
+            return HasRequiredFiles(directory)
                 ? Path.Combine(native, "eff_resource_pack.exe") : null;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or NullReferenceException) { return null; }
@@ -224,8 +226,12 @@ internal static class SharedNativeTools
     {
         var required = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "nativepack/eff_resource_pack.exe", "nativepack/eff_author_assets.dll", "nativepack/eff_source_index.exe",
-            "nativepack/eff_author_core.dll", "nativepack/package-protocol.json",
+            "nativepack/eff_resource_pack.exe", "nativepack/eff_source_index.exe", "nativepack/package-protocol.json",
+            "nativepack/eff_author_assets.dll", "nativepack/eff_author_core.dll", "nativepack/texconv.exe",
+            "nativepack/eff_migrate_mods.exe", "nativepack/source-exporter/eff_migrate_sources.exe",
+            "nativepack/source-exporter/AnimeStudio.GUI.dll",
+            "nativepack/source-exporter/AnimeStudio.GUI.deps.json",
+            "nativepack/source-exporter/AnimeStudio.GUI.runtimeconfig.json", "nativepack/THIRD_PARTY_NOTICES",
             "vendor/PIL/__init__.py", "vendor/PIL/_imaging.cp311-win_amd64.pyd",
             "vendor/PIL/_imaging.cp313-win_amd64.pyd"
         };
@@ -258,8 +264,16 @@ internal static class SharedNativeTools
     private static bool HasRequiredFiles(string directory)
     {
         var native = Path.Combine(directory, "nativepack");
-        return new[] { "eff_resource_pack.exe", "eff_author_assets.dll", "eff_source_index.exe", "eff_author_core.dll", "package-protocol.json" }
+        return new[]
+            {
+                "eff_resource_pack.exe", "eff_source_index.exe", "package-protocol.json",
+                "eff_author_assets.dll", "eff_author_core.dll", "texconv.exe", "eff_migrate_mods.exe",
+                "THIRD_PARTY_NOTICES"
+            }
             .All(name => File.Exists(Path.Combine(native, name))) &&
+            new[] { "eff_migrate_sources.exe", "AnimeStudio.GUI.dll", "AnimeStudio.GUI.deps.json",
+                "AnimeStudio.GUI.runtimeconfig.json" }.All(name =>
+                    File.Exists(Path.Combine(native, "source-exporter", name))) &&
             HasPillowAbis(directory);
     }
 

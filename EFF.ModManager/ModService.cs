@@ -65,6 +65,7 @@ internal static class ModService
             Folder = folder,
             IniPath = iniPath,
             Id = id,
+            Format = Value("format"),
             Name = name,
             Author = First(Value("author"), ""),
             Version = First(Value("version"), ""),
@@ -140,7 +141,7 @@ internal static class ModService
         }
     }
 
-    private static List<ModEntry> ScanTree(string root)
+    internal static List<ModEntry> ScanTree(string root)
     {
         var entries = new List<ModEntry>();
         foreach (var directory in WalkDirectories(root))

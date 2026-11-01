@@ -116,6 +116,7 @@
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <DockPanel Grid.Row="0" Margin="0,0,0,15">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+              <Button x:Name="MigrateBackupModsButton" Style="{StaticResource PrimaryButton}" Click="MigrateBackupMods_Click"><StackPanel Orientation="Horizontal"><TextBlock Text="&#xE8AB;" FontFamily="Segoe MDL2 Assets" Margin="0,0,8,0"/><TextBlock Text="{Binding [mods.migrateBackup], Source={x:Static local:LanguageService.Instance}}" /></StackPanel></Button>
               <Button Click="ImportMod_Click"><StackPanel Orientation="Horizontal"><TextBlock Text="" FontFamily="Segoe MDL2 Assets" Margin="0,0,8,0"/><TextBlock Text="{Binding [mods.import], Source={x:Static local:LanguageService.Instance}}" /></StackPanel></Button>
               <Button Margin="8,0,0,0" Click="DeleteMod_Click"><StackPanel Orientation="Horizontal"><TextBlock Text="" FontFamily="Segoe MDL2 Assets" Margin="0,0,8,0"/><TextBlock Text="{Binding [mods.delete], Source={x:Static local:LanguageService.Instance}}" /></StackPanel></Button>
             </StackPanel>

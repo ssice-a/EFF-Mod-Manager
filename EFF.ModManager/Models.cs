@@ -25,6 +25,7 @@ internal sealed class ModEntry : INotifyPropertyChanged
     public string Author { get; init; } = "";
     public string Version { get; init; } = "";
     public string Description { get; init; } = "";
+    public string Format { get; init; } = "";
     public bool IsEnabled { get; init; }
     public bool IsRepairSelected
     {

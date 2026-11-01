@@ -58,8 +58,10 @@ internal static class EndfieldSharedIndexes
     }
 
     internal static string DefaultWorkspace(string game)
+        => DefaultWorkspace(game, SharedResources.ResourceRoot);
+
+    internal static string DefaultWorkspace(string game, string resourceRoot)
     {
-        var resourceRoot = SharedResources.ResourceRoot;
         return string.IsNullOrEmpty(resourceRoot) ? string.Empty : Path.Combine(resourceRoot, "indexes", "installations",
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Normalize(game))))[..24], "workspace");
     }

@@ -17,6 +17,10 @@ try
 {
     VerifyUnpackedWorkspaceLookup(fixture);
     VerifySharedResourceSettings(fixture);
+    VerifyLegacyMigrationBatch(fixture);
+    await VerifyLegacyMigrationDownloadsPublicIndexAsync(fixture);
+    VerifyLegacyEffectPrefabParsing();
+    VerifyLegacyMigrationToolExtraction(fixture);
     VerifyCompiledModCacheMigration(fixture);
     VerifyExternalDllVersionDetection(fixture);
     await VerifyHistoricalIndexLookupAsync();
@@ -219,19 +223,54 @@ static void VerifySharedResourceSettings(string fixtureRoot)
         var native = Path.Combine(package, "nativepack");
         Directory.CreateDirectory(native);
         Directory.CreateDirectory(Path.Combine(package, "vendor", "PIL"));
-        foreach (var name in new[] { "eff_resource_pack.exe", "eff_author_assets.dll", "eff_source_index.exe", "eff_author_core.dll", "package-protocol.json" })
+        foreach (var name in new[] { "eff_resource_pack.exe", "eff_author_assets.dll", "eff_source_index.exe", "eff_author_core.dll", "package-protocol.json", "texconv.exe", "eff_migrate_mods.exe", "THIRD_PARTY_NOTICES" })
             File.WriteAllText(Path.Combine(native, name), "fixture");
+        var sourceExporter = Path.Combine(native, "source-exporter");
+        Directory.CreateDirectory(sourceExporter);
+        foreach (var name in new[] { "eff_migrate_sources.exe", "AnimeStudio.GUI.dll", "AnimeStudio.GUI.deps.json", "AnimeStudio.GUI.runtimeconfig.json" })
+            File.WriteAllText(Path.Combine(sourceExporter, name), "fixture");
         File.WriteAllText(Path.Combine(package, "vendor", "PIL", "__init__.py"), "");
         File.WriteAllBytes(Path.Combine(package, "vendor", "PIL", "_imaging.cp311-win_amd64.pyd"), []);
         File.WriteAllBytes(Path.Combine(package, "vendor", "PIL", "_imaging.cp313-win_amd64.pyd"), []);
         File.WriteAllText(Path.Combine(SharedResources.ResourceRoot, "tools", "current.json"), JsonSerializer.Serialize(new
         {
-            format = "EFF_SHARED_NATIVE_TOOLS_INSTALL/1",
+            format = "EFF_SHARED_NATIVE_TOOLS_INSTALL/3",
             sha256 = digest,
             release = "fixture"
         }));
         if (SharedNativeTools.FindInstalledCompiler(SharedResources.ResourceRoot) != Path.Combine(native, "eff_resource_pack.exe"))
             throw new InvalidOperationException("Mod Manager did not discover the shared package prepared by another client.");
+
+        var migrationDigest = new string('b', 64);
+        var migrationNative = Path.Combine(SharedResources.ResourceRoot, "tools", migrationDigest, "nativepack");
+        var migrationExporter = Path.Combine(migrationNative, "source-exporter");
+        var migrationPil = Path.Combine(SharedResources.ResourceRoot, "tools", migrationDigest, "vendor", "PIL");
+        Directory.CreateDirectory(migrationNative);
+        Directory.CreateDirectory(migrationExporter);
+        Directory.CreateDirectory(migrationPil);
+        foreach (var name in new[] { "eff_author_assets.dll", "eff_author_core.dll", "texconv.exe", "eff_migrate_mods.exe", "THIRD_PARTY_NOTICES" })
+            File.WriteAllText(Path.Combine(migrationNative, name), "fixture");
+        foreach (var name in new[] { "eff_migrate_sources.exe", "AnimeStudio.GUI.dll", "AnimeStudio.GUI.deps.json", "AnimeStudio.GUI.runtimeconfig.json" })
+            File.WriteAllText(Path.Combine(migrationExporter, name), "fixture");
+        File.WriteAllText(Path.Combine(migrationPil, "__init__.py"), "");
+        File.WriteAllBytes(Path.Combine(migrationPil, "_imaging.cp311-win_amd64.pyd"), []);
+        File.WriteAllBytes(Path.Combine(migrationPil, "_imaging.cp313-win_amd64.pyd"), []);
+        File.WriteAllText(Path.Combine(SharedResources.ResourceRoot, "tools", "legacy-migration.json"), JsonSerializer.Serialize(new
+        {
+            format = "EFF_LEGACY_MIGRATOR_INSTALL/1",
+            sha256 = migrationDigest,
+            release = "fixture"
+        }));
+        if (LegacyMigrationTools.FindInstalledMigrator(SharedResources.ResourceRoot) != Path.Combine(native, "eff_migrate_mods.exe"))
+            throw new InvalidOperationException("Mod Manager did not reuse the migration tool from the shared Format 3 package.");
+        File.WriteAllText(Path.Combine(SharedResources.ResourceRoot, "tools", "current.json"), JsonSerializer.Serialize(new
+        {
+            format = "EFF_SHARED_NATIVE_TOOLS_INSTALL/2",
+            sha256 = digest,
+            release = "older-client"
+        }));
+        if (LegacyMigrationTools.FindInstalledMigrator(SharedResources.ResourceRoot) != Path.Combine(migrationNative, "eff_migrate_mods.exe"))
+            throw new InvalidOperationException("Mod Manager did not retain the standalone migration cache alongside an older shared-tools receipt.");
 
         var index = Path.Combine(workspace, "index", "endfield_assets.eidx");
         Directory.CreateDirectory(Path.GetDirectoryName(index)!);
@@ -246,6 +285,161 @@ static void VerifySharedResourceSettings(string fixtureRoot)
         Environment.SetEnvironmentVariable("EFF_RESOURCE_ROOT", previousRoot);
     }
     Console.WriteLine("PASS: the selected tools root, AnimeStudio index workspace, and cross-client shared-tool cache are recognized together.");
+}
+
+static void VerifyLegacyMigrationBatch(string fixtureRoot)
+{
+    var root = Path.Combine(fixtureRoot, "legacy-migration-batch");
+    var backup = Path.Combine(root, "plugin", "backup");
+    var mods = Path.Combine(root, "plugin", "mods");
+    var stage = Path.Combine(mods, ".effmm-migration-test");
+    var original = Path.Combine(backup, "Alpha");
+    var staged = Path.Combine(stage, "Alpha");
+    Directory.CreateDirectory(original);
+    Directory.CreateDirectory(staged);
+    File.WriteAllText(Path.Combine(original, "mod.ini"), "[Mod]\nformat=2\nid=Alpha\nname=Alpha source\n");
+    File.WriteAllText(Path.Combine(original, "author.txt"), "preserved");
+    File.WriteAllText(Path.Combine(staged, "mod.ini"), "[Mod]\nformat=3\nid=Alpha\nname=Alpha migrated\n");
+
+    var sources = LegacyMigrationService.InspectBackup(backup);
+    if (sources.Count != 1 || sources[0].Id != "Alpha")
+        throw new InvalidOperationException("Format 2 backup discovery did not return the expected Mod.");
+    LegacyMigrationService.PublishBatch(mods, stage, sources);
+    if (!File.Exists(Path.Combine(mods, "Alpha", "mod.ini")) ||
+        !File.Exists(Path.Combine(original, "author.txt")) ||
+        File.ReadAllText(Path.Combine(original, "author.txt")) != "preserved")
+        throw new InvalidOperationException("Publishing did not retain the source backup while installing the migrated output.");
+
+    var conflictBackup = Path.Combine(root, "conflict-backup");
+    var conflictStage = Path.Combine(mods, ".effmm-migration-conflict");
+    var conflictSource = Path.Combine(conflictBackup, "Beta");
+    Directory.CreateDirectory(conflictSource);
+    Directory.CreateDirectory(Path.Combine(conflictStage, "Beta"));
+    File.WriteAllText(Path.Combine(conflictSource, "mod.ini"), "[Mod]\nformat=2\nid=Beta\n");
+    File.WriteAllText(Path.Combine(conflictStage, "Beta", "mod.ini"), "[Mod]\nformat=3\nid=Beta\n");
+    var conflictSources = LegacyMigrationService.InspectBackup(conflictBackup);
+    var installedConflict = Path.Combine(mods, "ExistingBeta");
+    Directory.CreateDirectory(installedConflict);
+    File.WriteAllText(Path.Combine(installedConflict, "mod.ini"), "[Mod]\nformat=3\nid=Beta\n");
+    var rejected = false;
+    try { LegacyMigrationService.PublishBatch(mods, conflictStage, conflictSources); }
+    catch (IOException) { rejected = true; }
+    if (!rejected || !Directory.Exists(Path.Combine(conflictStage, "Beta")) || !File.Exists(Path.Combine(conflictSource, "mod.ini")))
+        throw new InvalidOperationException("An installed ID conflict changed backup or staged migration data.");
+
+    Console.WriteLine("PASS: legacy migration validates Format 2 inputs, publishes Format 3 output, preserves backups, and blocks duplicate IDs.");
+}
+
+static void VerifyLegacyEffectPrefabParsing()
+{
+    var prefabs = LegacyMigrationService.ParseEffectPrefabs("""
+        {"effects":[{"mod":"Alpha","prefab":"actors/fx/strike.prefab"},{"mod":"Beta","prefab":"actors\\fx\\strike.prefab"},{"mod":"Beta","prefab":"actors/fx/spark.prefab"}]}
+        """);
+    if (!prefabs.SequenceEqual(new[] { "actors/fx/spark.prefab", "actors/fx/strike.prefab" }))
+        throw new InvalidOperationException("Legacy effect Prefabs were not normalized, deduplicated, and sorted.");
+
+    foreach (var json in new[]
+    {
+        "{}",
+        "{\"effects\":[{\"prefab\":\"../outside.prefab\"}]}",
+        "{\"effects\":[{\"prefab\":\"C:/outside.prefab\"}]}",
+        "{\"effects\":[{\"prefab\":\"actors/fx/not-an-effect.txt\"}]}",
+    })
+    {
+        var rejected = false;
+        try { LegacyMigrationService.ParseEffectPrefabs(json); }
+        catch (InvalidDataException) { rejected = true; }
+        if (!rejected) throw new InvalidOperationException("An invalid legacy effect Prefab response was accepted.");
+    }
+    Console.WriteLine("PASS: legacy effect Prefabs are deduplicated and unsafe or malformed paths are rejected.");
+}
+
+static async Task VerifyLegacyMigrationDownloadsPublicIndexAsync(string fixtureRoot)
+{
+    var game = Path.Combine(fixtureRoot, "migration-public-index-game");
+    var resourceRoot = Path.Combine(fixtureRoot, "migration-public-index-resources");
+    var content = "EFF_BUNDLE_CONTENT/1:" + new string('F', 64);
+    EndfieldVfsArchive.CurrentContentIdentity = content;
+    EndfieldSharedIndexes.CurrentWorkspace = null;
+    EndfieldSharedIndexes.RememberedWorkspace = null;
+    var payload = System.Text.Encoding.UTF8.GetBytes("verified-public-index-package");
+    var packageHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload));
+    const string catalogSource = "https://api.github.com/repos/ssice-a/EFF/releases?per_page=100";
+    const string catalogUrl = "https://github.com/ssice-a/EFF/releases/download/v9.0.0/eff-index-catalog.json";
+    const string packageUrl = "https://github.com/ssice-a/EFF/releases/download/v9.0.0/index.effindex.gz";
+    var index = new IndexDownload(new EndfieldIndexRelease("EFF_INDEX_RELEASE/1", "20261101", content,
+        "index.effindex.gz", payload.Length, packageHash, 128, new string('A', 64)), packageUrl);
+    var catalog = new RepairCatalog("EFF_REPAIR_CATALOG/1", "0.4.0", "", [index]);
+    var releases = JsonSerializer.Serialize(new[]
+    {
+        new { assets = new[] { new { name = "eff-index-catalog.json", browser_download_url = catalogUrl } } }
+    });
+    var routes = new Dictionary<string, Func<HttpResponseMessage>>(StringComparer.OrdinalIgnoreCase)
+    {
+        [catalogSource] = () => Response(releases),
+        [catalogUrl] = () => Response(JsonSerializer.Serialize(catalog)),
+        [packageUrl] = () => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(payload) }
+    };
+    using var client = new HttpClient(new HttpRouteHandler(routes));
+    var oldSource = Environment.GetEnvironmentVariable("EFF_INDEX_CATALOG");
+    Environment.SetEnvironmentVariable("EFF_INDEX_CATALOG", catalogSource);
+    try
+    {
+        var workspace = await LegacyMigrationService.ResolveWorkspaceAsync(game, "", resourceRoot, null,
+            CancellationToken.None, client);
+        var indexPath = Path.Combine(workspace, "index", "endfield_assets.eidx");
+        var packagePath = EndfieldIndexUpdates.CachedPackage(index, workspace);
+        if (!File.Exists(indexPath) || !File.Exists(indexPath + ".bundles") || !File.Exists(packagePath) ||
+            EndfieldSharedIndexes.RememberedWorkspace != workspace)
+            throw new InvalidOperationException("Migration did not download, import, and register the matching public index.");
+
+        EndfieldVfsArchive.CurrentContentIdentity = "EFF_BUNDLE_CONTENT/1:" + new string('0', 64);
+        var mismatchedResources = Path.Combine(fixtureRoot, "migration-mismatched-public-index-resources");
+        var rejected = false;
+        try
+        {
+            await LegacyMigrationService.ResolveWorkspaceAsync(game, "", mismatchedResources, null,
+                CancellationToken.None, client);
+        }
+        catch (IOException) { rejected = true; }
+        if (!rejected || Directory.Exists(mismatchedResources))
+            throw new InvalidOperationException("Migration accepted or downloaded an index for different game contents.");
+        Console.WriteLine("PASS: migration downloads and imports the exact public index when no local workspace is available.");
+    }
+    finally { Environment.SetEnvironmentVariable("EFF_INDEX_CATALOG", oldSource); }
+}
+
+static void VerifyLegacyMigrationToolExtraction(string fixtureRoot)
+{
+    var root = Path.Combine(fixtureRoot, "legacy-migration-tools");
+    var archivePath = Path.Combine(root, "tools.zip");
+    var resourceRoot = Path.Combine(root, "resources");
+    var destination = Path.Combine(resourceRoot, "tools", new string('c', 64));
+    Directory.CreateDirectory(root);
+    using (var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+    {
+        static void Add(ZipArchive archive, string path, string data)
+        {
+            using var writer = new StreamWriter(archive.CreateEntry(path).Open());
+            writer.Write(data);
+        }
+        foreach (var name in new[] { "eff_author_assets.dll", "eff_author_core.dll", "texconv.exe", "eff_migrate_mods.exe", "THIRD_PARTY_NOTICES" })
+            Add(archive, "EFF_Native_Tools/nativepack/" + name, "tool");
+        foreach (var name in new[] { "eff_migrate_sources.exe", "AnimeStudio.GUI.dll", "AnimeStudio.GUI.deps.json", "AnimeStudio.GUI.runtimeconfig.json" })
+            Add(archive, "EFF_Native_Tools/nativepack/source-exporter/" + name, "source exporter");
+        Add(archive, "EFF_Native_Tools/vendor/PIL/__init__.py", "");
+        Add(archive, "EFF_Native_Tools/vendor/PIL/_imaging.cp311-win_amd64.pyd", "cp311");
+        Add(archive, "EFF_Native_Tools/vendor/PIL/_imaging.cp313-win_amd64.pyd", "cp313");
+        Add(archive, "EFF_Native_Tools/vendor/PIL/Image.py", "shared image module");
+    }
+
+    LegacyMigrationTools.Extract(archivePath, destination, resourceRoot);
+    if (!File.Exists(Path.Combine(destination, "vendor", "PIL", "Image.py")) ||
+        !File.Exists(Path.Combine(destination, "nativepack", "eff_migrate_mods.exe")) ||
+        !File.Exists(Path.Combine(destination, "nativepack", "source-exporter", "eff_migrate_sources.exe")))
+        throw new InvalidOperationException("The migration tool installer dropped files required by Pillow or the Format 3 migrator.");
+
+    Console.WriteLine("PASS: migration tool extraction retains the complete shared Pillow package and validates the migrator payload.");
 }
 
 static async Task VerifyHistoricalIndexLookupAsync()

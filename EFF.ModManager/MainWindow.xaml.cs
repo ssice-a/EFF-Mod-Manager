@@ -176,10 +176,10 @@ public partial class MainWindow : Window
     private void RefreshSharedToolsStatus()
     {
         if (SharedToolsStatus is null) return;
-        var compiler = SharedNativeTools.FindInstalledCompiler(SharedResources.ResourceRoot);
-        SharedToolsStatus.Text = compiler is null
+        var migrator = LegacyMigrationTools.FindInstalledMigrator(SharedResources.ResourceRoot);
+        SharedToolsStatus.Text = migrator is null
             ? T("settings.toolsMissing")
-            : string.Format(T("settings.toolsReady"), compiler);
+            : string.Format(T("settings.toolsReady"), migrator);
     }
 
     private async void PrepareSharedTools_Click(object sender, RoutedEventArgs e)
@@ -199,9 +199,8 @@ public partial class MainWindow : Window
             SettingsStore.Save(_settings);
             PrepareSharedToolsButton.IsEnabled = false;
             SharedToolsStatus.Text = T("settings.preparingTools");
-            var compiler = await Task.Run(
-                () => SharedNativeTools.GetCompilerAsync(_settings.ResourceRoot, _shutdown.Token), _shutdown.Token);
-            SharedToolsStatus.Text = string.Format(T("settings.toolsReady"), compiler);
+            var migrator = await LegacyMigrationTools.GetMigratorAsync(_settings.ResourceRoot, _shutdown.Token);
+            SharedToolsStatus.Text = string.Format(T("settings.toolsReady"), migrator);
             SetStatus(T("settings.toolsPrepared"));
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
@@ -447,6 +446,7 @@ public partial class MainWindow : Window
             ModCountText.Text = "0";
             EnabledCountText.Text = "0";
             ModListCount.Text = string.Format(T("mods.count"), 0);
+            MigrateBackupModsButton.IsEnabled = false;
             EmptyModsOverlay.Visibility = Visibility.Visible;
             RepairEmptyText.Visibility = Visibility.Visible;
             ClearDetails();
@@ -455,6 +455,7 @@ public partial class MainWindow : Window
         }
 
         _allMods = ModService.Scan(GamePath);
+        MigrateBackupModsButton.IsEnabled = Directory.Exists(LegacyMigrationService.BackupRoot(GamePath));
         ModCountText.Text = _allMods.Count.ToString();
         EnabledCountText.Text = _allMods.Count(mod => mod.IsEnabled).ToString();
         var selected = _allMods.FirstOrDefault(mod => string.Equals(mod.Folder, selectedFolder, StringComparison.OrdinalIgnoreCase))
@@ -532,6 +533,49 @@ public partial class MainWindow : Window
         if (!EnsureGame()) return;
         var dialog = new OpenFileDialog { Filter = "Mod packages (*.zip)|*.zip|All files (*.*)|*.*", Multiselect = true, CheckFileExists = true };
         if (dialog.ShowDialog(this) == true) await ImportPathsAsync(dialog.FileNames);
+    }
+
+    private async void MigrateBackupMods_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureGame()) return;
+        IReadOnlyList<LegacyModSource> sources;
+        try { sources = LegacyMigrationService.InspectBackup(LegacyMigrationService.BackupRoot(GamePath)); }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, error.Message, T("dialog.title"), MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        if (sources.Count == 0)
+        {
+            SetStatus(T("mods.empty"));
+            return;
+        }
+
+        var confirmation = string.Format(T("dialog.migrateBackup"), sources.Count) + Environment.NewLine + Environment.NewLine +
+            string.Join(Environment.NewLine, sources.Select(source => source.Name + " (" + source.Id + ")"));
+        if (MessageBox.Show(this, confirmation, T("dialog.title"), MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return;
+
+        var game = GamePath;
+        var resourceRoot = string.IsNullOrWhiteSpace(SharedResources.ResourceRoot) ? _settings.ResourceRoot : SharedResources.ResourceRoot;
+        var workspace = SharedResources.IndexWorkspace;
+        await ExecuteAsync(async () =>
+        {
+            MigrateBackupModsButton.IsEnabled = false;
+            try
+            {
+                var progress = new Progress<string>(SetStatus);
+                var result = await LegacyMigrationService.MigrateAsync(game, resourceRoot, workspace, progress, _shutdown.Token);
+                RefreshMods();
+                var summary = string.Format(T("status.migrationComplete"), result.Migrated, result.MigratedEffects);
+                SetStatus(summary);
+                MessageBox.Show(this, summary, T("dialog.title"), MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            finally
+            {
+                MigrateBackupModsButton.IsEnabled = Directory.Exists(LegacyMigrationService.BackupRoot(game));
+            }
+        });
     }
 
     private async void DeleteMod_Click(object sender, RoutedEventArgs e)
