@@ -1,6 +1,7 @@
 #nullable enable annotations
 #nullable disable warnings
 using AnimeStudio.GUI;
+using EffModManager;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -105,7 +106,7 @@ internal static class RepairService
     internal static async Task<string> Repair(string mod, string game, string index, string content, string compiler,
         IProgress<string>? progress, CancellationToken token)
     {
-        mod = Path.GetFullPath(mod).TrimEnd('\\');RequireGameClosed(game);await ValidateProtocol(game, compiler, token);
+        mod = Path.GetFullPath(mod).TrimEnd('\\');ModService.RequireFormat3(mod);RequireGameClosed(game);await ValidateProtocol(game, compiler, token);
         var cacheKind = CompiledModCache.Detect(mod);
         if (!File.Exists(Path.Combine(mod, "mod.ini")))
         {

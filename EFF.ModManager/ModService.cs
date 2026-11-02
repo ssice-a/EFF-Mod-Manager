@@ -154,7 +154,18 @@ internal static class ModService
         return entries;
     }
 
-    private static void CopyDirectorySafely(string source, string destination, CancellationToken token)
+    internal static void RequireFormat3(string mod)
+    {
+        var entries = ScanTree(mod);
+        if (entries.Count != 1)
+            throw new IOException("Select one Mod folder with one mod.ini before rebuilding its runtime cache.");
+        if (entries[0].Format == "2")
+            throw new IOException("This is a Format 2 Mod. Migrate it to Format 3 from the Repair page before rebuilding its runtime cache.");
+        if (entries[0].Format != "3")
+            throw new IOException("Only Format 3 Mods can be repaired for the current runtime.");
+    }
+
+    internal static void CopyDirectorySafely(string source, string destination, CancellationToken token)
     {
         if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0) throw new IOException("Symbolic links are not supported in Mod folders.");
         Directory.CreateDirectory(destination);

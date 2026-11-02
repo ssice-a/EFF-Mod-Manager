@@ -15,9 +15,11 @@ Directory.CreateDirectory(Path.GetDirectoryName(input)!);
 
 try
 {
+    VerifyEmptyResourceRootStartupSetting();
     VerifyUnpackedWorkspaceLookup(fixture);
     VerifySharedResourceSettings(fixture);
     VerifyLegacyMigrationBatch(fixture);
+    VerifyFormat2RepairRequiresMigration(fixture);
     await VerifyLegacyMigrationDownloadsPublicIndexAsync(fixture);
     VerifyLegacyEffectPrefabParsing();
     VerifyLegacyMigrationToolExtraction(fixture);
@@ -105,6 +107,17 @@ finally
 }
 
 static ModEntry Single(IEnumerable<ModEntry> items) => items.Single();
+static void VerifyEmptyResourceRootStartupSetting()
+{
+    var legacy = Path.Combine(Path.GetTempPath(), "EFF", "Resources");
+    foreach (var value in new string?[] { null, "", "   " })
+        if (SettingsStore.IsLegacyResourceRoot(value, legacy))
+            throw new InvalidOperationException("An empty resource root was treated as the legacy path.");
+    if (!SettingsStore.IsLegacyResourceRoot(legacy, legacy))
+        throw new InvalidOperationException("The legacy resource path was not recognized.");
+    Console.WriteLine("PASS: blank shared-resource settings do not fail MainWindow path initialization.");
+}
+
 static void VerifyCompiledModCacheMigration(string fixtureRoot)
 {
     var mod = Path.Combine(fixtureRoot, "legacy-repair-mod");
@@ -305,9 +318,12 @@ static void VerifyLegacyMigrationBatch(string fixtureRoot)
     if (sources.Count != 1 || sources[0].Id != "Alpha")
         throw new InvalidOperationException("Format 2 backup discovery did not return the expected Mod.");
     LegacyMigrationService.PublishBatch(mods, stage, sources);
+    var installedBackupMigration = ModService.ScanTree(Path.Combine(mods, "Alpha")).Single();
+    var preservedBackupMigration = ModService.ScanTree(original).Single();
     if (!File.Exists(Path.Combine(mods, "Alpha", "mod.ini")) ||
         !File.Exists(Path.Combine(original, "author.txt")) ||
-        File.ReadAllText(Path.Combine(original, "author.txt")) != "preserved")
+        File.ReadAllText(Path.Combine(original, "author.txt")) != "preserved" ||
+        installedBackupMigration.Format != "3" || preservedBackupMigration.Format != "2")
         throw new InvalidOperationException("Publishing did not retain the source backup while installing the migrated output.");
 
     var conflictBackup = Path.Combine(root, "conflict-backup");
@@ -327,7 +343,49 @@ static void VerifyLegacyMigrationBatch(string fixtureRoot)
     if (!rejected || !Directory.Exists(Path.Combine(conflictStage, "Beta")) || !File.Exists(Path.Combine(conflictSource, "mod.ini")))
         throw new InvalidOperationException("An installed ID conflict changed backup or staged migration data.");
 
+    var installedLegacy = Path.Combine(mods, "Gamma");
+    var replacementStage = Path.Combine(mods, ".effmm-replacement-stage");
+    var replacementKey = "gamma-source";
+    var replacement = Path.Combine(replacementStage, replacementKey);
+    Directory.CreateDirectory(installedLegacy);
+    Directory.CreateDirectory(replacement);
+    File.WriteAllText(Path.Combine(installedLegacy, "mod.ini"), "[Mod]\nformat=2\nid=Gamma\n");
+    File.WriteAllText(Path.Combine(installedLegacy, "legacy.dat"), "rollback copy");
+    File.WriteAllText(Path.Combine(replacement, "mod.ini"), "[Mod]\nformat=3\nid=Gamma\n");
+    LegacyMigrationService.PublishReplacements(mods, replacementStage,
+        [new LegacyModSource(replacementKey, "Gamma", "Gamma")],
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [replacementKey] = installedLegacy },
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+    var replaced = ModService.ScanTree(installedLegacy).Single();
+    var rollbackFile = Directory.EnumerateFiles(
+        Path.Combine(mods, ".eff-repair-backups", "format2-migration"), "legacy.dat", SearchOption.AllDirectories).Single();
+    var rollbackMod = ModService.ScanTree(Path.GetDirectoryName(rollbackFile)!).Single();
+    var activeMods = ModService.Scan(root);
+    if (replaced.Format != "3" || rollbackMod.Format != "2" ||
+        activeMods.Any(mod => mod.Format != "3") ||
+        File.ReadAllText(rollbackFile) != "rollback copy")
+        throw new InvalidOperationException("Repair migration did not publish Format 3 while preserving the old Format 2 folder.");
+
     Console.WriteLine("PASS: legacy migration validates Format 2 inputs, publishes Format 3 output, preserves backups, and blocks duplicate IDs.");
+}
+
+static void VerifyFormat2RepairRequiresMigration(string fixtureRoot)
+{
+    var oldMod = Path.Combine(fixtureRoot, "format2-repair-guard");
+    Directory.CreateDirectory(oldMod);
+    File.WriteAllText(Path.Combine(oldMod, "mod.ini"), "[Mod]\nformat=2\nid=Legacy\n");
+    var rejected = false;
+    try { ModService.RequireFormat3(oldMod); }
+    catch (IOException error) when (error.Message.Contains("Migrate it to Format 3", StringComparison.Ordinal)) { rejected = true; }
+    if (!rejected) throw new InvalidOperationException("The cache repair path accepted a Format 2 Mod without migrating it.");
+    File.WriteAllText(Path.Combine(oldMod, "mod.ini"), "[Mod]\nformat=3\nid=Legacy\n");
+    ModService.RequireFormat3(oldMod);
+    File.WriteAllText(Path.Combine(oldMod, "mod.ini"), "[Mod]\nformat=4\nid=Future\n");
+    rejected = false;
+    try { ModService.RequireFormat3(oldMod); }
+    catch (IOException error) when (error.Message.Contains("Only Format 3 Mods", StringComparison.Ordinal)) { rejected = true; }
+    if (!rejected) throw new InvalidOperationException("An unknown Mod format was routed into Format 3 cache repair.");
+    Console.WriteLine("PASS: cache repair rejects Format 2 and only accepts Format 3 after migration.");
 }
 
 static void VerifyLegacyEffectPrefabParsing()

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net.Http;
 using System.Text.Json;
 using AnimeStudio.GUI;
+using EffRepair;
 
 namespace EffModManager;
 
@@ -84,36 +85,16 @@ internal static class LegacyMigrationService
         var backupRoot = BackupRoot(game);
         var sources = InspectBackup(backupRoot);
         if (sources.Count == 0) throw new DirectoryNotFoundException("No Format 2 Mods were found in plugin\\backup.");
-        workspace = await ResolveWorkspaceAsync(game, workspace, resourceRoot, progress, token);
         var modsRoot = ModService.ModsRoot(game);
         Directory.CreateDirectory(modsRoot);
         ValidateNoConflicts(modsRoot, sources);
 
-        progress?.Report("Preparing the Format 3 migration tool...");
-        var migrator = await LegacyMigrationTools.GetMigratorAsync(resourceRoot, token);
-        var packageRoot = Directory.GetParent(Directory.GetParent(migrator)!.FullName)!.FullName;
-        var nativeRoot = Path.Combine(packageRoot, "nativepack");
         var transactionRoot = Path.Combine(modsRoot, ".effmm-migration-" + Guid.NewGuid().ToString("N"));
-        var stagingRoot = Path.Combine(transactionRoot, "mods");
-        var sourceRoot = Path.Combine(transactionRoot, "sources");
-        Directory.CreateDirectory(stagingRoot);
         var keepStaging = false;
         try
         {
-            var effectPrefabs = await ListEffectPrefabs(migrator, backupRoot, token);
-            progress?.Report("Exporting the exact source Mesh, Material, and Texture records from the AnimeStudio index...");
-            var sourceExporter = Path.Combine(nativeRoot, "source-exporter", "eff_migrate_sources.exe");
-            await RunSourceExporter(sourceExporter, game, workspace, sourceRoot, backupRoot, sources, token);
-            if (effectPrefabs.Count > 0)
-            {
-                progress?.Report($"Exporting {effectPrefabs.Count} exact effect source snapshot(s) from the AnimeStudio index...");
-                foreach (var prefab in effectPrefabs)
-                    await RunEffectSourceExporter(sourceExporter, game, workspace, prefab, sourceRoot, token);
-            }
-            progress?.Report($"Migrating {sources.Count} backup Mods to Format 3...");
-            var output = await RunMigrator(migrator, backupRoot, stagingRoot, workspace, sourceRoot, nativeRoot,
-                Path.Combine(packageRoot, "vendor"), sources, token);
-            ValidateOutputs(stagingRoot, sources);
+            var (stagingRoot, output) = await BuildStagedBatchAsync(
+                game, resourceRoot, workspace, backupRoot, sources, transactionRoot, progress, token);
             progress?.Report("Publishing the verified Mod batch...");
             PublishBatch(modsRoot, stagingRoot, sources, () => keepStaging = true);
             return output;
@@ -122,6 +103,95 @@ internal static class LegacyMigrationService
         {
             if (!keepStaging && Directory.Exists(transactionRoot)) Directory.Delete(transactionRoot, true);
         }
+    }
+
+    internal static async Task<LegacyMigrationSummary> MigrateInstalledModsAsync(string game, string resourceRoot,
+        string workspace, IReadOnlyList<ModEntry> mods, IProgress<string>? progress, CancellationToken token)
+    {
+        game = Path.GetFullPath(game);
+        if (!GameDiscovery.IsGame(game)) throw new IOException("Choose a valid Endfield game folder first.");
+        EnsureGameClosed(game);
+        var selected = mods.Where(mod => mod.Format == "2").ToArray();
+        if (selected.Length == 0) return new LegacyMigrationSummary(0, 0, []);
+
+        var duplicate = selected.GroupBy(mod => mod.Id, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => string.IsNullOrWhiteSpace(group.Key) || group.Count() > 1);
+        if (duplicate is not null)
+            throw new InvalidDataException("Selected Format 2 Mods need unique, nonempty IDs: " + duplicate.Key);
+
+        var modsRoot = ModService.ModsRoot(game);
+        var transactionRoot = Path.Combine(modsRoot, ".effmm-repair-migration-" + Guid.NewGuid().ToString("N"));
+        var inputRoot = Path.Combine(transactionRoot, "mod-inputs");
+        var stagingRoot = Path.Combine(transactionRoot, "mods");
+        Directory.CreateDirectory(inputRoot);
+        var sources = new List<LegacyModSource>(selected.Length);
+        var destinations = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var disabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var keepStaging = false;
+        try
+        {
+            for (var index = 0; index < selected.Length; index++)
+            {
+                token.ThrowIfCancellationRequested();
+                var mod = selected[index];
+                var key = "mod-" + (index + 1).ToString("D4", System.Globalization.CultureInfo.InvariantCulture);
+                var snapshot = Path.Combine(inputRoot, key);
+                ModService.CopyDirectorySafely(mod.Folder, snapshot, token);
+                if (!mod.IsEnabled)
+                {
+                    var disabledDescriptor = Path.Combine(snapshot, "mod.ini.effmm-disabled");
+                    if (!File.Exists(disabledDescriptor))
+                        throw new InvalidDataException("Disabled Format 2 Mod descriptor is missing: " + mod.Folder);
+                    File.Move(disabledDescriptor, Path.Combine(snapshot, "mod.ini"));
+                    disabled.Add(key);
+                }
+                CompiledModCache.ClearDerived(snapshot);
+                sources.Add(new LegacyModSource(key, mod.Id, mod.Name));
+                destinations.Add(key, Path.GetFullPath(mod.Folder));
+            }
+
+            var (staged, result) = await BuildStagedBatchAsync(
+                game, resourceRoot, workspace, inputRoot, sources, transactionRoot, progress, token);
+            PublishReplacements(modsRoot, staged, sources, destinations, disabled,
+                () => keepStaging = true);
+            return result;
+        }
+        finally
+        {
+            if (!keepStaging && Directory.Exists(transactionRoot)) Directory.Delete(transactionRoot, true);
+        }
+    }
+
+    private static async Task<(string StagingRoot, LegacyMigrationSummary Summary)> BuildStagedBatchAsync(
+        string game, string resourceRoot, string workspace, string modInputRoot,
+        IReadOnlyList<LegacyModSource> sources, string transactionRoot,
+        IProgress<string>? progress, CancellationToken token)
+    {
+        workspace = await ResolveWorkspaceAsync(game, workspace, resourceRoot, progress, token);
+        var stagingRoot = Path.Combine(transactionRoot, "mods");
+        var sourceRoot = Path.Combine(transactionRoot, "sources");
+        Directory.CreateDirectory(stagingRoot);
+        Directory.CreateDirectory(sourceRoot);
+
+        progress?.Report("Preparing the Format 3 migration tool...");
+        var migrator = await LegacyMigrationTools.GetMigratorAsync(resourceRoot, token);
+        var packageRoot = Directory.GetParent(Directory.GetParent(migrator)!.FullName)!.FullName;
+        var nativeRoot = Path.Combine(packageRoot, "nativepack");
+        var effectPrefabs = await ListEffectPrefabs(migrator, modInputRoot, token);
+        progress?.Report("Exporting the exact source Mesh, Material, and Texture records from the AnimeStudio index...");
+        var sourceExporter = Path.Combine(nativeRoot, "source-exporter", "eff_migrate_sources.exe");
+        await RunSourceExporter(sourceExporter, game, workspace, sourceRoot, modInputRoot, sources, token);
+        if (effectPrefabs.Count > 0)
+        {
+            progress?.Report($"Exporting {effectPrefabs.Count} exact effect source snapshot(s) from the AnimeStudio index...");
+            foreach (var prefab in effectPrefabs)
+                await RunEffectSourceExporter(sourceExporter, game, workspace, prefab, sourceRoot, token);
+        }
+        progress?.Report($"Migrating {sources.Count} Format 2 Mods to Format 3...");
+        var output = await RunMigrator(migrator, modInputRoot, stagingRoot, workspace, sourceRoot, nativeRoot,
+            Path.Combine(packageRoot, "vendor"), sources, token);
+        ValidateOutputs(stagingRoot, sources);
+        return (stagingRoot, output);
     }
 
     internal static IReadOnlyList<string> ParseEffectPrefabs(string json)
@@ -296,6 +366,70 @@ internal static class LegacyMigrationService
                     new AggregateException(new[] { publishError }.Concat(rollbackErrors)));
             }
             throw new IOException("Batch publication failed. All published Mods were rolled back.", publishError);
+        }
+    }
+
+    internal static void PublishReplacements(string modsRoot, string stagingRoot,
+        IReadOnlyList<LegacyModSource> sources, IReadOnlyDictionary<string, string> destinations,
+        IReadOnlySet<string> disabled, Action? preserveStagingOnRollbackFailure = null)
+    {
+        ValidateOutputs(stagingRoot, sources);
+        var root = Path.GetFullPath(modsRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var backupRoot = Path.Combine(modsRoot, ".eff-repair-backups", "format2-migration",
+            DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(backupRoot);
+        var moved = new List<(string Staged, string Destination, string Backup)>();
+        try
+        {
+            foreach (var source in sources)
+            {
+                if (!destinations.TryGetValue(source.FolderName, out var destination))
+                    throw new InvalidDataException("A migrated Mod has no replacement destination: " + source.FolderName);
+                destination = Path.GetFullPath(destination);
+                if (!destination.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !Directory.Exists(destination))
+                    throw new IOException("The selected Mod folder moved or is outside plugin\\mods: " + destination);
+
+                var staged = Path.Combine(stagingRoot, source.FolderName);
+                if (disabled.Contains(source.FolderName))
+                    File.Move(Path.Combine(staged, "mod.ini"), Path.Combine(staged, "mod.ini.effmm-disabled"));
+                var backup = Path.Combine(backupRoot, source.FolderName);
+                Directory.Move(destination, backup);
+                try
+                {
+                    Directory.Move(staged, destination);
+                }
+                catch
+                {
+                    Directory.Move(backup, destination);
+                    throw;
+                }
+                moved.Add((staged, destination, backup));
+
+                var installed = ModService.ScanTree(destination).SingleOrDefault();
+                if (installed is null || installed.Format != "3" ||
+                    !string.Equals(installed.Id, source.Id, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("The published replacement failed Format 3 validation: " + source.FolderName);
+            }
+        }
+        catch (Exception publishError)
+        {
+            var rollbackErrors = new List<Exception>();
+            foreach (var item in moved.AsEnumerable().Reverse())
+            {
+                try
+                {
+                    if (Directory.Exists(item.Destination)) Directory.Move(item.Destination, item.Staged);
+                    if (Directory.Exists(item.Backup)) Directory.Move(item.Backup, item.Destination);
+                }
+                catch (Exception rollbackError) { rollbackErrors.Add(rollbackError); }
+            }
+            if (rollbackErrors.Count > 0)
+            {
+                preserveStagingOnRollbackFailure?.Invoke();
+                throw new IOException("Format 3 replacement failed and rollback was incomplete. Recovery data was retained at: " + stagingRoot,
+                    new AggregateException(new[] { publishError }.Concat(rollbackErrors)));
+            }
+            throw new IOException("Format 3 replacement failed. Original Mods were restored.", publishError);
         }
     }
 

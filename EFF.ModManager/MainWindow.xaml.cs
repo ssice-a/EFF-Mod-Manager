@@ -30,8 +30,7 @@ public partial class MainWindow : Window
         var sharedRoot = SharedResources.ResourceRoot;
         if (!string.IsNullOrWhiteSpace(sharedRoot))
             _settings.ResourceRoot = sharedRoot;
-        else if (
-            string.Equals(Path.GetFullPath(_settings.ResourceRoot), Path.GetFullPath(legacyRoot), StringComparison.OrdinalIgnoreCase))
+        else if (SettingsStore.IsLegacyResourceRoot(_settings.ResourceRoot, legacyRoot))
             _settings.ResourceRoot = "";
         else if (!string.IsNullOrWhiteSpace(_settings.ResourceRoot) && Directory.Exists(_settings.ResourceRoot))
             SharedResources.SetResourceRoot(_settings.ResourceRoot);
@@ -635,10 +634,17 @@ public partial class MainWindow : Window
 
     private async void OpenRepair_Click(object sender, RoutedEventArgs e)
     {
-        var selected = RepairModsList.Items.OfType<ModEntry>().Where(mod => mod.IsRepairSelected).Select(mod => mod.Folder).ToArray();
+        var selectedMods = RepairModsList.Items.OfType<ModEntry>().Where(mod => mod.IsRepairSelected).ToArray();
         if (!EnsureGame()) return;
         var gamePath = GamePath;
-        if (selected.Length == 0) { RepairStatusText.Text = T("repair.selectOne"); return; }
+        if (selectedMods.Length == 0) { RepairStatusText.Text = T("repair.selectOne"); return; }
+        var unsupported = selectedMods.Where(mod => mod.Format is not ("2" or "3")).ToArray();
+        if (unsupported.Length > 0)
+        {
+            RepairStatusText.Text = string.Format(T("repair.unsupportedFormat"),
+                string.Join(", ", unsupported.Select(mod => mod.Name + " (" + (mod.Format.Length == 0 ? "unknown" : mod.Format) + ")")));
+            return;
+        }
         var root = ResourceRootBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(root)) { RepairStatusText.Text = T("repair.chooseResources"); return; }
 
@@ -655,9 +661,30 @@ public partial class MainWindow : Window
             });
             try
             {
-                var result = await Task.Run(() => IntegratedRepairService.RepairAsync(gamePath, root, selected, progress, _shutdown.Token), _shutdown.Token);
-                RepairStatusText.Text = string.Format(T("repair.complete"), result.Repaired, result.Failed, result.Workspace);
-                SetStatus(string.Format(T("repair.completeShort"), result.Repaired, result.Failed));
+                var legacy = selectedMods.Where(mod => mod.Format == "2").ToArray();
+                var current = selectedMods.Where(mod => mod.Format == "3").Select(mod => mod.Folder).ToArray();
+                var migrated = legacy.Length == 0
+                    ? new LegacyMigrationSummary(0, 0, [])
+                    : await LegacyMigrationService.MigrateInstalledModsAsync(
+                        gamePath, root, SharedResources.IndexWorkspace, legacy, progress, _shutdown.Token);
+                var repaired = current.Length == 0
+                    ? new RepairRunSummary(0, 0, SharedResources.IndexWorkspace)
+                    : await Task.Run(() => IntegratedRepairService.RepairAsync(
+                        gamePath, root, current, progress, _shutdown.Token), _shutdown.Token);
+                if (migrated.Migrated > 0)
+                {
+                    var rollbackRoot = Path.Combine(ModService.ModsRoot(gamePath), ".eff-repair-backups", "format2-migration");
+                    RepairStatusText.Text = string.Format(T("repair.completeWithMigration"),
+                        migrated.Migrated, repaired.Repaired, repaired.Failed, rollbackRoot);
+                    SetStatus(string.Format(T("repair.completeMigrationShort"),
+                        migrated.Migrated, repaired.Repaired, repaired.Failed));
+                }
+                else
+                {
+                    RepairStatusText.Text = string.Format(T("repair.complete"),
+                        repaired.Repaired, repaired.Failed, repaired.Workspace);
+                    SetStatus(string.Format(T("repair.completeShort"), repaired.Repaired, repaired.Failed));
+                }
                 RefreshMods();
             }
             finally

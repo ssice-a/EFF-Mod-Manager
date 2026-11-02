@@ -8,6 +8,9 @@ internal static class SettingsStore
     internal static string SettingsPath => Path.Combine(DataRoot, "settings.json");
     internal static string DllStatePath(string game) => Path.Combine(DataRoot, "installations", GameKey(game), "dll-install.json");
     internal static string BackupRoot(string game) => Path.Combine(DataRoot, "installations", GameKey(game), "backups");
+    internal static bool IsLegacyResourceRoot(string? resourceRoot, string legacyRoot) =>
+        !string.IsNullOrWhiteSpace(resourceRoot) &&
+        string.Equals(Path.GetFullPath(resourceRoot), Path.GetFullPath(legacyRoot), StringComparison.OrdinalIgnoreCase);
     internal static string GameKey(string game) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(game).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToLowerInvariant())))[..16];
     internal static JsonSerializerOptions JsonOptions { get; } = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
 
