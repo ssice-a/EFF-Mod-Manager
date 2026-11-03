@@ -104,6 +104,34 @@ internal static partial class GitHubReleaseService
         }
     }
 
+    internal static async Task<bool> IsVerifiedAssetFileAsync(GitHubAsset asset, string path, CancellationToken token)
+    {
+        if (!File.Exists(path) || asset.size < 0 || string.IsNullOrWhiteSpace(asset.digest)) return false;
+        var expected = asset.digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) ? asset.digest[7..] : asset.digest;
+        if (expected.Length != 64 || !expected.All(Uri.IsHexDigit)) return false;
+
+        try
+        {
+            var info = new FileInfo(path);
+            if (info.Length != asset.size) return false;
+            await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 131072, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var buffer = new byte[131072];
+            while (true)
+            {
+                var read = await input.ReadAsync(buffer, token);
+                if (read == 0) break;
+                hash.AppendData(buffer, 0, read);
+            }
+            var actual = Convert.ToHexString(hash.GetHashAndReset());
+            return string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     internal static Version DllVersion(string assetName) => ParseAssetVersion(DllAssetVersion(), assetName);
     internal static Version RepairVersion(string assetName) => ParseAssetVersion(RepairAssetVersion(), assetName);
 

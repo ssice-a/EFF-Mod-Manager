@@ -5,7 +5,7 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>0.2.1</Version>
+    <Version>0.2.2</Version>
     <DefineConstants>$(DefineConstants);EFF_SOURCE_READER</DefineConstants>
     <AssemblyName>EFF.ModManager</AssemblyName>
     <RootNamespace>EffModManager</RootNamespace>

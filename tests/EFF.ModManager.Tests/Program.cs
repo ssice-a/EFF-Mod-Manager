@@ -1,6 +1,8 @@
 using System.IO.Compression;
 using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using AnimeStudio.GUI;
 using EffModManager;
@@ -16,6 +18,8 @@ Directory.CreateDirectory(Path.GetDirectoryName(input)!);
 try
 {
     VerifyEmptyResourceRootStartupSetting();
+    await VerifyManagerUpdateCache(fixture);
+    await VerifyManagerUpdateApplyTransaction(fixture);
     VerifyUnpackedWorkspaceLookup(fixture);
     VerifySharedResourceSettings(fixture);
     VerifyLegacyMigrationBatch(fixture);
@@ -116,6 +120,82 @@ static void VerifyEmptyResourceRootStartupSetting()
     if (!SettingsStore.IsLegacyResourceRoot(legacy, legacy))
         throw new InvalidOperationException("The legacy resource path was not recognized.");
     Console.WriteLine("PASS: blank shared-resource settings do not fail MainWindow path initialization.");
+}
+
+static async Task VerifyManagerUpdateCache(string fixtureRoot)
+{
+    var package = Path.Combine(fixtureRoot, "manager-update.zip");
+    var bytes = Encoding.UTF8.GetBytes("verified manager update fixture");
+    await File.WriteAllBytesAsync(package, bytes);
+    var digest = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    var asset = new GitHubAsset { name = "EFF-Mod-Manager-v0.2.2-win-x64.zip", size = bytes.Length, digest = "sha256:" + digest };
+    if (!await GitHubReleaseService.IsVerifiedAssetFileAsync(asset, package, CancellationToken.None))
+        throw new InvalidOperationException("A matching cached Manager update package was not reused.");
+    asset.digest = "sha256:" + new string('0', 64);
+    if (await GitHubReleaseService.IsVerifiedAssetFileAsync(asset, package, CancellationToken.None))
+        throw new InvalidOperationException("A cached Manager update package with the wrong digest was reused.");
+    asset.digest = null;
+    if (await GitHubReleaseService.IsVerifiedAssetFileAsync(asset, package, CancellationToken.None))
+        throw new InvalidOperationException("A cached Manager update package without a publisher digest was reused.");
+
+    var writable = Path.Combine(fixtureRoot, "manager-writable-install");
+    Directory.CreateDirectory(writable);
+    ManagerUpdateService.EnsureInstallRootWritable(writable);
+    var notDirectory = Path.Combine(fixtureRoot, "manager-install-file");
+    File.WriteAllText(notDirectory, "not a directory");
+    var rejected = false;
+    try { ManagerUpdateService.EnsureInstallRootWritable(notDirectory); }
+    catch (IOException) { rejected = true; }
+    catch (UnauthorizedAccessException) { rejected = true; }
+    if (!rejected) throw new InvalidOperationException("An unwritable Manager install target passed the preflight check.");
+    Console.WriteLine("PASS: Manager update reuses only size-and-SHA-256-verified packages and checks install write access before shutdown.");
+}
+
+static async Task VerifyManagerUpdateApplyTransaction(string fixtureRoot)
+{
+    var powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+    if (!File.Exists(powershell)) throw new FileNotFoundException("Windows PowerShell is required for the Manager update handoff test.", powershell);
+
+    var stage = Path.Combine(fixtureRoot, "manager-update-apply-failure");
+    var unpacked = Path.Combine(stage, "unpacked");
+    var target = Path.Combine(fixtureRoot, "manager-update-install");
+    var cachedPackage = Path.Combine(fixtureRoot, "cached-manager-update.zip");
+    await File.WriteAllTextAsync(cachedPackage, "verified package retained after apply failure");
+    Directory.CreateDirectory(unpacked);
+    Directory.CreateDirectory(target);
+    File.WriteAllText(Path.Combine(unpacked, "EFF.ModManager.exe"), "not an executable");
+    File.WriteAllText(Path.Combine(unpacked, "EFF.ModManager.runtimeconfig.json"), "new runtime config");
+    File.WriteAllText(Path.Combine(target, "EFF.ModManager.exe"), "old executable");
+    File.WriteAllText(Path.Combine(target, "EFF.ModManager.runtimeconfig.json"), "old runtime config");
+    var script = Path.Combine(stage, "apply-update.ps1");
+    await File.WriteAllTextAsync(script,
+        ManagerUpdateService.BuildScript(stage, unpacked, target, "EFF.ModManager.exe", 0, showFailureUi: false));
+    using (var process = Process.Start(new ProcessStartInfo(powershell)
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        ArgumentList = { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script }
+    }) ?? throw new IOException("Could not start the isolated Manager update transaction test."))
+    {
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        if (process.ExitCode == 0) throw new InvalidOperationException("A non-executable Manager update was reported as successful. " + await standardOutput + await standardError);
+        var output = await standardOutput + await standardError;
+        if (output.Length > 0) Console.WriteLine("Manager update helper output: " + output);
+    }
+
+    if (File.ReadAllText(Path.Combine(target, "EFF.ModManager.exe")) != "old executable" ||
+        File.ReadAllText(Path.Combine(target, "EFF.ModManager.runtimeconfig.json")) != "old runtime config")
+        throw new InvalidOperationException("A failed Manager update did not restore its previous files.");
+    var log = Path.Combine(stage, "update.log");
+    if (!File.Exists(log) || !File.ReadAllText(log).Contains("Manager update failed", StringComparison.Ordinal))
+        throw new InvalidOperationException("A failed Manager update did not retain its diagnostic log and failed stage.");
+    if (!File.Exists(cachedPackage) || File.ReadAllText(cachedPackage) != "verified package retained after apply failure")
+        throw new InvalidOperationException("A failed Manager update removed its verified cached package.");
+    Console.WriteLine("PASS: failed Manager replacement rolls back files, retains its diagnostic log, and leaves the verified package cached.");
 }
 
 static void VerifyCompiledModCacheMigration(string fixtureRoot)
