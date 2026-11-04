@@ -104,7 +104,7 @@ internal static class ModService
         if (!Directory.Exists(sourcePath) && !File.Exists(sourcePath)) throw new IOException("Import source does not exist.");
         var modsRoot = ModsRoot(game);
         Directory.CreateDirectory(modsRoot);
-        var temporary = Path.Combine(SettingsStore.DataRoot, "staging", Guid.NewGuid().ToString("N"));
+        var temporary = SettingsStore.GameStagingPath(game, "import");
         Directory.CreateDirectory(temporary);
         var stage = Path.Combine(temporary, "package");
         Directory.CreateDirectory(stage);

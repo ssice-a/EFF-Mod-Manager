@@ -8,6 +8,26 @@ internal static class SettingsStore
     internal static string SettingsPath => Path.Combine(DataRoot, "settings.json");
     internal static string DllStatePath(string game) => Path.Combine(DataRoot, "installations", GameKey(game), "dll-install.json");
     internal static string BackupRoot(string game) => Path.Combine(DataRoot, "installations", GameKey(game), "backups");
+    internal static bool IsSystemDrivePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        var systemRoot = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        if (string.IsNullOrWhiteSpace(systemRoot))
+            systemRoot = Environment.GetEnvironmentVariable("SystemDrive") + Path.DirectorySeparatorChar;
+        var pathRoot = Path.GetPathRoot(Path.GetFullPath(path));
+        return !string.IsNullOrWhiteSpace(systemRoot) &&
+            string.Equals(pathRoot, systemRoot, StringComparison.OrdinalIgnoreCase);
+    }
+    internal static string RequireNonSystemCacheRoot(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) throw new IOException("Choose a cache folder outside the Windows system drive.");
+        var fullPath = Path.GetFullPath(path);
+        if (IsSystemDrivePath(fullPath))
+            throw new IOException("Cache files must be stored outside the Windows system drive.");
+        return fullPath;
+    }
+    internal static string GameStagingPath(string game, string operation) => Path.Combine(
+        Path.GetFullPath(game), "plugin", ".effmm-staging-" + operation + "-" + Guid.NewGuid().ToString("N"));
     internal static bool IsLegacyResourceRoot(string? resourceRoot, string legacyRoot) =>
         !string.IsNullOrWhiteSpace(resourceRoot) &&
         string.Equals(Path.GetFullPath(resourceRoot), Path.GetFullPath(legacyRoot), StringComparison.OrdinalIgnoreCase);

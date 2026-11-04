@@ -18,7 +18,17 @@ internal static class ManagerUpdateService
         return asset is null ? (release, null, null) : (release, asset, AssetVersion(asset.name));
     }
 
-    internal static async Task UpdateAndRestartAsync(GitHubAsset asset, Version version, IProgress<string>? progress, CancellationToken token)
+    internal static string ResolveCacheRoot(string resourceRoot, string gamePath)
+    {
+        if (!string.IsNullOrWhiteSpace(resourceRoot) && !SettingsStore.IsSystemDrivePath(resourceRoot))
+            return Path.Combine(Path.GetFullPath(resourceRoot), ".effmm-cache", "manager-update");
+        if (!string.IsNullOrWhiteSpace(gamePath) && !SettingsStore.IsSystemDrivePath(gamePath))
+            return Path.Combine(Path.GetFullPath(gamePath), "plugin", ".effmm-cache", "manager-update");
+        throw new IOException("Manager update cache must be stored outside the Windows system drive. Choose a non-system resource folder or game drive.");
+    }
+
+    internal static async Task UpdateAndRestartAsync(GitHubAsset asset, Version version,
+        string resourceRoot, string gamePath, IProgress<string>? progress, CancellationToken token)
     {
         var processPath = Environment.ProcessPath ?? throw new IOException("Could not locate the running app.");
         var installRoot = Path.GetDirectoryName(processPath)!;
@@ -26,7 +36,7 @@ internal static class ManagerUpdateService
         if (Path.GetFileName(asset.name) != asset.name || string.IsNullOrWhiteSpace(asset.name))
             throw new InvalidDataException("Manager update asset name is invalid.");
 
-        var cacheRoot = Path.Combine(SettingsStore.DataRoot, "update-cache", "manager");
+        var cacheRoot = ResolveCacheRoot(resourceRoot, gamePath);
         var package = Path.Combine(cacheRoot, asset.name);
         Directory.CreateDirectory(cacheRoot);
         if (await GitHubReleaseService.IsVerifiedAssetFileAsync(asset, package, token))
@@ -39,7 +49,7 @@ internal static class ManagerUpdateService
             await GitHubReleaseService.DownloadVerifiedAsync(asset, package, progress, token);
         }
 
-        var stage = Path.Combine(SettingsStore.DataRoot, "staging", "manager-update-" + Guid.NewGuid().ToString("N"));
+        var stage = Path.Combine(cacheRoot, "staging-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(stage);
         var handedOff = false;
         try

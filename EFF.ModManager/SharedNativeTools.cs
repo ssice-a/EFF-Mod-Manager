@@ -30,7 +30,7 @@ internal static class SharedNativeTools
         if (string.IsNullOrWhiteSpace(resourceRoot))
             throw new IOException("请先在设置中选择资源存储目录；共享编译器将安装到该目录的 tools 子文件夹。");
 
-        var root = Path.GetFullPath(resourceRoot);
+        var root = SettingsStore.RequireNonSystemCacheRoot(resourceRoot);
         var tools = Path.Combine(root, "tools");
         Directory.CreateDirectory(tools);
         await using var gate = await AcquireLockAsync(Path.Combine(tools, "install.lock"), token);

@@ -60,7 +60,7 @@ internal static class LegacyMigrationService
             throw new IOException("No public index matches this game's exact Bundle contents. No Mods were migrated.");
 
         Directory.CreateDirectory(defaultWorkspace);
-        var package = EndfieldIndexUpdates.CachedPackage(published, defaultWorkspace);
+        var package = EndfieldIndexUpdates.CachedPackage(published, resourceRoot);
         progress?.Report("Downloading and verifying the matching public game index...");
         await EndfieldIndexUpdates.Download(published, package, progress ?? new Progress<string>(_ => { }), token, indexClient!);
         token.ThrowIfCancellationRequested();

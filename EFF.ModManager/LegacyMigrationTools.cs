@@ -44,7 +44,7 @@ internal static class LegacyMigrationTools
         if (string.IsNullOrWhiteSpace(resourceRoot))
             throw new IOException("Choose a shared resource folder in Settings before preparing migration tools.");
 
-        var root = Path.GetFullPath(resourceRoot);
+        var root = SettingsStore.RequireNonSystemCacheRoot(resourceRoot);
         var tools = Path.Combine(root, "tools");
         Directory.CreateDirectory(tools);
         await using var gate = await AcquireLockAsync(Path.Combine(tools, "install.lock"), token);

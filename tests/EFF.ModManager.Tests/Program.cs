@@ -18,6 +18,7 @@ Directory.CreateDirectory(Path.GetDirectoryName(input)!);
 try
 {
     VerifyEmptyResourceRootStartupSetting();
+    VerifyManagerUpdateCacheLocation();
     await VerifyManagerUpdateCache(fixture);
     await VerifyManagerUpdateApplyTransaction(fixture);
     VerifyUnpackedWorkspaceLookup(fixture);
@@ -27,6 +28,7 @@ try
     await VerifyLegacyMigrationDownloadsPublicIndexAsync(fixture);
     VerifyLegacyEffectPrefabParsing();
     VerifyLegacyMigrationToolExtraction(fixture);
+    VerifyManualModFolderChanges(fixture);
     VerifyCompiledModCacheMigration(fixture);
     VerifyExternalDllVersionDetection(fixture);
     await VerifyHistoricalIndexLookupAsync();
@@ -149,6 +151,45 @@ static async Task VerifyManagerUpdateCache(string fixtureRoot)
     catch (UnauthorizedAccessException) { rejected = true; }
     if (!rejected) throw new InvalidOperationException("An unwritable Manager install target passed the preflight check.");
     Console.WriteLine("PASS: Manager update reuses only size-and-SHA-256-verified packages and checks install write access before shutdown.");
+}
+
+static void VerifyManagerUpdateCacheLocation()
+{
+    var systemRoot = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+    if (string.IsNullOrWhiteSpace(systemRoot))
+        systemRoot = Environment.GetEnvironmentVariable("SystemDrive") + Path.DirectorySeparatorChar;
+    var alternateRoot = string.Equals(systemRoot, "Z:\\", StringComparison.OrdinalIgnoreCase) ? "Y:\\" : "Z:\\";
+    var systemResources = Path.Combine(systemRoot!, "resource-root");
+    var externalGame = Path.Combine(alternateRoot, "Games", "Endfield");
+    var fallback = ManagerUpdateService.ResolveCacheRoot(systemResources, externalGame);
+    if (!fallback.StartsWith(Path.GetFullPath(externalGame), StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("Manager update cache did not fall back to the game drive when its resource root was on the system drive.");
+
+    var externalResources = Path.Combine(alternateRoot, "EFF-Resources");
+    var preferred = ManagerUpdateService.ResolveCacheRoot(externalResources, externalGame);
+    var expected = Path.Combine(Path.GetFullPath(externalResources), ".effmm-cache", "manager-update");
+    if (!string.Equals(preferred, expected, StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("Manager update cache did not use the selected external resource root.");
+
+    var rejected = false;
+    try { ManagerUpdateService.ResolveCacheRoot(systemResources, Path.Combine(systemRoot!, "Games", "Endfield")); }
+    catch (IOException) { rejected = true; }
+    if (!rejected) throw new InvalidOperationException("Manager update cache accepted a system-drive-only configuration.");
+    Console.WriteLine("PASS: Manager update downloads and staging resolve to a non-system drive.");
+}
+
+static void VerifyManualModFolderChanges(string fixtureRoot)
+{
+    var game = Path.Combine(fixtureRoot, "manual-mod-folder-game");
+    var mod = Path.Combine(ModService.ModsRoot(game), "ManualMod");
+    Directory.CreateDirectory(mod);
+    File.WriteAllText(Path.Combine(mod, "mod.ini"), "[Mod]\nid=ManualMod\nname=Manual Mod\nformat=3\n");
+    if (ModService.Scan(game).Single().Id != "ManualMod")
+        throw new InvalidOperationException("A manually added Mod folder did not appear in a fresh scan.");
+    Directory.Delete(mod, true);
+    if (ModService.Scan(game).Count != 0)
+        throw new InvalidOperationException("A manually deleted Mod folder remained in a fresh scan.");
+    Console.WriteLine("PASS: a fresh Mod scan reflects folders added or removed outside the manager.");
 }
 
 static async Task VerifyManagerUpdateApplyTransaction(string fixtureRoot)
@@ -526,8 +567,9 @@ static async Task VerifyLegacyMigrationDownloadsPublicIndexAsync(string fixtureR
         var workspace = await LegacyMigrationService.ResolveWorkspaceAsync(game, "", resourceRoot, null,
             CancellationToken.None, client);
         var indexPath = Path.Combine(workspace, "index", "endfield_assets.eidx");
-        var packagePath = EndfieldIndexUpdates.CachedPackage(index, workspace);
+        var packagePath = EndfieldIndexUpdates.CachedPackage(index, resourceRoot);
         if (!File.Exists(indexPath) || !File.Exists(indexPath + ".bundles") || !File.Exists(packagePath) ||
+            !packagePath.StartsWith(Path.GetFullPath(resourceRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
             EndfieldSharedIndexes.RememberedWorkspace != workspace)
             throw new InvalidOperationException("Migration did not download, import, and register the matching public index.");
 

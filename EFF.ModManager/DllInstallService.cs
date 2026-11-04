@@ -60,7 +60,7 @@ internal static class DllInstallService
         var state = ReadState(game) ?? new DllInstallationState();
         foreach (var record in state.Files) ValidateManagedPath(record.RelativePath);
         var previous = state.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
-        var temp = Path.Combine(SettingsStore.DataRoot, "staging", "dll-" + Guid.NewGuid().ToString("N"));
+        var temp = SettingsStore.GameStagingPath(game, "dll-install");
         var rollback = Path.Combine(temp, "rollback");
         var extracted = Path.Combine(temp, "package");
         Directory.CreateDirectory(extracted);
@@ -150,6 +150,8 @@ internal static class DllInstallService
         finally
         {
             if (Directory.Exists(temp)) Directory.Delete(temp, true);
+            var plugin = Path.Combine(game, "plugin");
+            if (Directory.Exists(plugin) && !Directory.EnumerateFileSystemEntries(plugin).Any()) Directory.Delete(plugin);
         }
     }
 
@@ -182,7 +184,7 @@ internal static class DllInstallService
             if (File.Exists(target) || restoreFrom is not null) planned.Add((file, target, restoreFrom));
         }
 
-        var transaction = Path.Combine(SettingsStore.DataRoot, "staging", "uninstall-" + Guid.NewGuid().ToString("N"));
+        var transaction = SettingsStore.GameStagingPath(game, "dll-uninstall");
         var changedTargets = new List<(string Target, string? Snapshot)>();
         Directory.CreateDirectory(transaction);
         var statePath = SettingsStore.DllStatePath(game);
@@ -209,8 +211,6 @@ internal static class DllInstallService
             }
 
             if (File.Exists(statePath)) File.Delete(statePath);
-            var plugin = Path.Combine(root, "plugin");
-            if (Directory.Exists(plugin) && !Directory.EnumerateFileSystemEntries(plugin).Any()) Directory.Delete(plugin);
             return changed.Count == 0 ? "Removed" : "Preserved modified files: " + string.Join(", ", changed);
         }
         catch
@@ -233,6 +233,8 @@ internal static class DllInstallService
         finally
         {
             if (Directory.Exists(transaction)) Directory.Delete(transaction, true);
+            var plugin = Path.Combine(root, "plugin");
+            if (Directory.Exists(plugin) && !Directory.EnumerateFileSystemEntries(plugin).Any()) Directory.Delete(plugin);
         }
     }
 

@@ -1,4 +1,5 @@
 using Microsoft.Win32;
+using System.Diagnostics;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows;
@@ -153,6 +154,12 @@ public partial class MainWindow : Window
         if (_initializing) return;
         var text = sender is TextBox box ? box.Text.Trim() : ResourceRootBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(text)) return;
+        if (SettingsStore.IsSystemDrivePath(text))
+        {
+            if (sender is TextBox textBox) textBox.Text = _settings.ResourceRoot;
+            SetStatus(T("settings.cacheOffSystemDrive"));
+            return;
+        }
         try
         {
             SharedResources.SetResourceRoot(text);
@@ -175,6 +182,11 @@ public partial class MainWindow : Window
     private void RefreshSharedToolsStatus()
     {
         if (SharedToolsStatus is null) return;
+        if (SettingsStore.IsSystemDrivePath(SharedResources.ResourceRoot))
+        {
+            SharedToolsStatus.Text = T("settings.cacheOffSystemDrive");
+            return;
+        }
         var migrator = LegacyMigrationTools.FindInstalledMigrator(SharedResources.ResourceRoot);
         SharedToolsStatus.Text = migrator is null
             ? T("settings.toolsMissing")
@@ -188,6 +200,11 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(root))
         {
             SharedToolsStatus.Text = T("settings.chooseResourceRoot");
+            return;
+        }
+        if (SettingsStore.IsSystemDrivePath(root))
+        {
+            SharedToolsStatus.Text = T("settings.cacheOffSystemDrive");
             return;
         }
 
@@ -383,7 +400,10 @@ public partial class MainWindow : Window
                     {
                         SetStatus(T("status.managerUpdating"));
                         var progress = new Progress<string>(SetStatus);
-                        await ManagerUpdateService.UpdateAndRestartAsync(result.Manager.Asset, result.Manager.Version, progress, _shutdown.Token);
+                        var resourceRoot = SharedResources.ResourceRoot;
+                        var gamePath = HasGame ? GamePath : "";
+                        await ManagerUpdateService.UpdateAndRestartAsync(result.Manager.Asset, result.Manager.Version,
+                            resourceRoot, gamePath, progress, _shutdown.Token);
                         Close();
                         return;
                     }
@@ -453,12 +473,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        var previousFolder = selectedFolder ?? (ModsList.SelectedItem as ModEntry)?.Folder;
         _allMods = ModService.Scan(GamePath);
         MigrateBackupModsButton.IsEnabled = Directory.Exists(LegacyMigrationService.BackupRoot(GamePath));
         ModCountText.Text = _allMods.Count.ToString();
         EnabledCountText.Text = _allMods.Count(mod => mod.IsEnabled).ToString();
-        var selected = _allMods.FirstOrDefault(mod => string.Equals(mod.Folder, selectedFolder, StringComparison.OrdinalIgnoreCase))
-            ?? ModsList.SelectedItem as ModEntry;
+        var selected = _allMods.FirstOrDefault(mod => string.Equals(mod.Folder, previousFolder, StringComparison.OrdinalIgnoreCase));
         ApplyModFilter(selected?.Folder);
         foreach (var mod in _allMods) mod.IsRepairSelected = true;
         RepairModsList.ItemsSource = new ObservableCollection<ModEntry>(_allMods);
@@ -476,13 +496,41 @@ public partial class MainWindow : Window
             mod.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase) ||
             mod.Author.Contains(query, StringComparison.CurrentCultureIgnoreCase) ||
             mod.Id.Contains(query, StringComparison.CurrentCultureIgnoreCase)).ToList();
+        ModsList.SelectedItem = null;
         ModsList.ItemsSource = filtered;
         ModListCount.Text = string.Format(T("mods.count"), filtered.Count);
         EmptyModsOverlay.Visibility = filtered.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         var selected = filtered.FirstOrDefault(mod => string.Equals(mod.Folder, selectedFolder, StringComparison.OrdinalIgnoreCase));
         if (selected is not null) ModsList.SelectedItem = selected;
-        else if (filtered.Count > 0 && ModsList.SelectedItem is null) ModsList.SelectedIndex = 0;
+        else if (filtered.Count > 0) ModsList.SelectedIndex = 0;
         else if (filtered.Count == 0) ClearDetails();
+    }
+
+    private void RefreshMods_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            RefreshMods(ModsList.SelectedItem is ModEntry mod ? mod.Folder : null);
+            RefreshDllState();
+            SetStatus(T("status.modsRefreshed"));
+        }
+        catch (Exception error)
+        {
+            SetStatus(error.Message);
+            MessageBox.Show(this, error.Message, T("dialog.title"), MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void OpenModsFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureGame()) return;
+        var modsRoot = ModService.ModsRoot(GamePath);
+        Directory.CreateDirectory(modsRoot);
+        Process.Start(new ProcessStartInfo("explorer.exe")
+        {
+            UseShellExecute = false,
+            ArgumentList = { modsRoot }
+        });
     }
 
     private void ModSearch_TextChanged(object sender, TextChangedEventArgs e)
@@ -557,6 +605,16 @@ public partial class MainWindow : Window
 
         var game = GamePath;
         var resourceRoot = string.IsNullOrWhiteSpace(SharedResources.ResourceRoot) ? _settings.ResourceRoot : SharedResources.ResourceRoot;
+        if (string.IsNullOrWhiteSpace(resourceRoot))
+        {
+            SetStatus(T("settings.chooseResourceRoot"));
+            return;
+        }
+        if (SettingsStore.IsSystemDrivePath(resourceRoot))
+        {
+            SetStatus(T("settings.cacheOffSystemDrive"));
+            return;
+        }
         var workspace = SharedResources.IndexWorkspace;
         await ExecuteAsync(async () =>
         {
@@ -624,6 +682,11 @@ public partial class MainWindow : Window
     {
         var dialog = new OpenFolderDialog { Title = T("settings.resources"), InitialDirectory = Directory.Exists(ResourceRootBox.Text) ? ResourceRootBox.Text : "" };
         if (dialog.ShowDialog(this) != true) return;
+        if (SettingsStore.IsSystemDrivePath(dialog.FolderName))
+        {
+            SetStatus(T("settings.cacheOffSystemDrive"));
+            return;
+        }
         _settings.ResourceRoot = dialog.FolderName;
         SharedResources.SetResourceRoot(dialog.FolderName);
         ResourceRootBox.Text = dialog.FolderName;
@@ -647,6 +710,7 @@ public partial class MainWindow : Window
         }
         var root = ResourceRootBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(root)) { RepairStatusText.Text = T("repair.chooseResources"); return; }
+        if (SettingsStore.IsSystemDrivePath(root)) { RepairStatusText.Text = T("settings.cacheOffSystemDrive"); return; }
 
         await ExecuteAsync(async () =>
         {
