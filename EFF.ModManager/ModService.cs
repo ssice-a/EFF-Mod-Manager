@@ -53,7 +53,7 @@ internal static class ModService
         metadata ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string Value(string key) => metadata.GetValueOrDefault(key, "").Trim();
         var id = Value("id");
-        var name = First(Value("name"), Value("title"), id, Path.GetFileName(folder));
+        var name = First(Value("name"), Value("title"), Path.GetFileName(folder), id);
         var hotkeys = sections
             .Where(section => section.Key.StartsWith("Key", StringComparison.OrdinalIgnoreCase) && section.Value.TryGetValue("key", out var key) && !string.IsNullOrWhiteSpace(key))
             .Select(section => $"{section.Value["key"].Trim()}  ·  {section.Key}")
@@ -233,6 +233,211 @@ internal static class ModService
             if (!File.Exists(enabledPath)) throw new IOException("Mod descriptor was not found.");
             if (File.Exists(disabledPath)) throw new IOException("Cannot disable because a disabled descriptor already exists.");
             File.Move(enabledPath, disabledPath);
+        }
+    }
+
+    internal static void Rename(string modsRoot, ModEntry mod, string requestedName, IReadOnlyList<ModEntry> allMods)
+    {
+        var name = ValidateModName(requestedName);
+        var root = Path.GetFullPath(modsRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var oldFolder = Path.GetFullPath(mod.Folder);
+        var relativeRoot = Path.GetRelativePath(root, oldFolder);
+        if (relativeRoot == "." || Path.IsPathRooted(relativeRoot) || relativeRoot == ".." ||
+            relativeRoot.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
+            relativeRoot.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
+            throw new IOException("The Mod folder must be inside the game's Mods directory and cannot be the Mods directory itself.");
+
+        var iniPath = Path.GetFullPath(mod.IniPath);
+        if (!string.Equals(Path.GetDirectoryName(iniPath), oldFolder, StringComparison.OrdinalIgnoreCase) ||
+            !(string.Equals(Path.GetFileName(iniPath), "mod.ini", StringComparison.OrdinalIgnoreCase) ||
+              string.Equals(Path.GetFileName(iniPath), "mod.ini" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)))
+            throw new IOException("The Mod descriptor is not directly inside its Mod folder.");
+
+        var newFolder = Path.Combine(Path.GetDirectoryName(oldFolder)!, name);
+        var sameFolderIgnoringCase = string.Equals(oldFolder, newFolder, StringComparison.OrdinalIgnoreCase);
+        if (!sameFolderIgnoringCase && (Directory.Exists(newFolder) || File.Exists(newFolder)))
+            throw new IOException("A file or Mod folder with that name already exists.");
+
+        var originalIni = File.ReadAllBytes(iniPath);
+        var updatedIni = UpdateModIniName(originalIni, name);
+        var iniChanged = !originalIni.AsSpan().SequenceEqual(updatedIni);
+        if (iniChanged) WriteBytesAtomic(iniPath, updatedIni);
+
+        try
+        {
+            if (!string.Equals(oldFolder, newFolder, StringComparison.Ordinal))
+                MoveModFolder(oldFolder, newFolder, root, sameFolderIgnoringCase);
+        }
+        catch (Exception moveError)
+        {
+            if (iniChanged)
+            {
+                try { WriteBytesAtomic(iniPath, originalIni); }
+                catch (Exception rollbackError)
+                {
+                    throw new IOException("Mod folder rename failed and the mod.ini change could not be rolled back.",
+                        new AggregateException(moveError, rollbackError));
+                }
+            }
+            throw;
+        }
+
+        var oldPrefix = oldFolder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var affected = allMods.Append(mod).Distinct().Where(item =>
+        {
+            var folder = Path.GetFullPath(item.Folder);
+            return string.Equals(folder, oldFolder, StringComparison.OrdinalIgnoreCase) ||
+                folder.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase);
+        }).ToArray();
+        foreach (var item in affected)
+        {
+            var itemFolder = Path.GetFullPath(item.Folder);
+            var itemIni = Path.GetFullPath(item.IniPath);
+            var relativeFolder = Path.GetRelativePath(oldFolder, itemFolder);
+            var relativeIni = Path.GetRelativePath(oldFolder, itemIni);
+            item.Folder = relativeFolder == "." ? newFolder : Path.GetFullPath(Path.Combine(newFolder, relativeFolder));
+            item.IniPath = Path.GetFullPath(Path.Combine(newFolder, relativeIni));
+        }
+        mod.Name = name;
+    }
+
+    private static string ValidateModName(string requestedName)
+    {
+        var name = requestedName.Trim();
+        if (name.Length == 0) throw new IOException("Mod name cannot be empty.");
+        if (name.Length > 80) throw new IOException("Mod name cannot exceed 80 characters.");
+        if (name.Any(character => char.IsControl(character) || Path.GetInvalidFileNameChars().Contains(character)) || name.EndsWith('.'))
+            throw new IOException("Mod name contains characters that are not allowed in a folder name.");
+        var deviceName = name.Split('.')[0];
+        if (new[] { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" }
+            .Contains(deviceName, StringComparer.OrdinalIgnoreCase))
+            throw new IOException("Mod name is reserved by Windows and cannot be used as a folder name.");
+        return name;
+    }
+
+    private sealed class IniLine(string content, string ending)
+    {
+        internal string Content { get; set; } = content;
+        internal string Ending { get; set; } = ending;
+    }
+
+    private static byte[] UpdateModIniName(byte[] source, string name)
+    {
+        var (encoding, preambleLength) = DetectEncoding(source);
+        var text = encoding.GetString(source, preambleLength, source.Length - preambleLength);
+        var lines = SplitIniLines(text);
+        var currentSection = "";
+        var nameLines = new List<int>();
+
+        for (var index = 0; index < lines.Count; index++)
+        {
+            var line = lines[index].Content.Trim();
+            if (line.Length == 0 || line.StartsWith(';') || line.StartsWith('#')) continue;
+            if (line.StartsWith('[') && line.EndsWith(']'))
+            {
+                currentSection = line[1..^1].Trim();
+                continue;
+            }
+            if (string.Equals(currentSection, "Mod", StringComparison.OrdinalIgnoreCase) && IsDisplayNameEntry(lines[index].Content))
+                nameLines.Add(index);
+        }
+
+        if (nameLines.Count == 0) return source;
+        foreach (var index in nameLines) SetIniValue(lines[index], name);
+
+        var updatedText = string.Concat(lines.Select(line => line.Content + line.Ending));
+        var payload = encoding.GetBytes(updatedText);
+        var preamble = encoding.GetPreamble();
+        var result = new byte[preamble.Length + payload.Length];
+        Buffer.BlockCopy(preamble, 0, result, 0, preamble.Length);
+        Buffer.BlockCopy(payload, 0, result, preamble.Length, payload.Length);
+        return result;
+    }
+
+    private static bool IsDisplayNameEntry(string line)
+    {
+        var separator = line.IndexOf('=');
+        if (separator <= 0) return false;
+        var key = line[..separator].Trim();
+        return string.Equals(key, "name", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(key, "title", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void SetIniValue(IniLine line, string value)
+    {
+        var separator = line.Content.IndexOf('=');
+        var valueStart = separator + 1;
+        while (valueStart < line.Content.Length && char.IsWhiteSpace(line.Content[valueStart])) valueStart++;
+        var suffixStart = line.Content.Length;
+        while (suffixStart > valueStart && char.IsWhiteSpace(line.Content[suffixStart - 1])) suffixStart--;
+        line.Content = line.Content[..valueStart] + value + line.Content[suffixStart..];
+    }
+
+    private static List<IniLine> SplitIniLines(string text)
+    {
+        var result = new List<IniLine>();
+        var start = 0;
+        for (var index = 0; index < text.Length; index++)
+        {
+            if (text[index] is not '\r' and not '\n') continue;
+            var endingLength = text[index] == '\r' && index + 1 < text.Length && text[index + 1] == '\n' ? 2 : 1;
+            result.Add(new IniLine(text[start..index], text.Substring(index, endingLength)));
+            index += endingLength - 1;
+            start = index + 1;
+        }
+        if (start < text.Length || result.Count == 0) result.Add(new IniLine(text[start..], ""));
+        return result;
+    }
+
+    private static (Encoding Encoding, int PreambleLength) DetectEncoding(byte[] bytes)
+    {
+        if (bytes.Length >= 4 && bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0xFE && bytes[3] == 0xFF)
+            return (new UTF32Encoding(true, true, true), 4);
+        if (bytes.Length >= 4 && bytes[0] == 0xFF && bytes[1] == 0xFE && bytes[2] == 0x00 && bytes[3] == 0x00)
+            return (new UTF32Encoding(false, true, true), 4);
+        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+            return (new UTF8Encoding(true, true), 3);
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+            return (new UnicodeEncoding(true, true, true), 2);
+        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+            return (new UnicodeEncoding(false, true, true), 2);
+        return (new UTF8Encoding(false, true), 0);
+    }
+
+    private static void MoveModFolder(string source, string destination, string modsRoot, bool caseOnly)
+    {
+        if (!caseOnly)
+        {
+            Directory.Move(source, destination);
+            return;
+        }
+
+        var temporary = Path.Combine(modsRoot, ".effmm-rename-" + Guid.NewGuid().ToString("N"));
+        Directory.Move(source, temporary);
+        try { Directory.Move(temporary, destination); }
+        catch (Exception moveError)
+        {
+            try { Directory.Move(temporary, source); }
+            catch (Exception rollbackError)
+            {
+                throw new IOException("Mod folder casing update failed and the original folder could not be restored.",
+                    new AggregateException(moveError, rollbackError));
+            }
+            throw;
+        }
+    }
+
+    private static void WriteBytesAtomic(string path, byte[] content)
+    {
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllBytes(temporary, content);
+            File.Move(temporary, path, true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
         }
     }
 

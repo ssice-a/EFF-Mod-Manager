@@ -29,6 +29,7 @@ try
     VerifyLegacyEffectPrefabParsing();
     VerifyLegacyMigrationToolExtraction(fixture);
     VerifyManualModFolderChanges(fixture);
+    VerifyModRenameTransaction(fixture);
     VerifyCompiledModCacheMigration(fixture);
     VerifyExternalDllVersionDetection(fixture);
     await VerifyHistoricalIndexLookupAsync();
@@ -190,6 +191,92 @@ static void VerifyManualModFolderChanges(string fixtureRoot)
     if (ModService.Scan(game).Count != 0)
         throw new InvalidOperationException("A manually deleted Mod folder remained in a fresh scan.");
     Console.WriteLine("PASS: a fresh Mod scan reflects folders added or removed outside the manager.");
+}
+
+static void VerifyModRenameTransaction(string fixtureRoot)
+{
+    var game = Path.Combine(fixtureRoot, "rename-game");
+    var modsRoot = ModService.ModsRoot(game);
+    var folder = Path.Combine(modsRoot, "LZY");
+    Directory.CreateDirectory(folder);
+    var ini = Path.Combine(folder, "mod.ini");
+    const string originalIni = "; preserve this comment\r\n[Mod]\r\nformat=3\r\nid=stable-lzy\r\nname = Old Name  \r\n\r\n[Other]\r\nname=untouched\r\n";
+    var utf8 = new UTF8Encoding(false, true);
+    var preamble = new UTF8Encoding(true, true).GetPreamble();
+    File.WriteAllBytes(ini, preamble.Concat(utf8.GetBytes(originalIni)).ToArray());
+    var opaqueFile = Path.Combine(folder, "untouched.dat");
+    var opaqueBytes = new byte[] { 1, 2, 3, 4, 5 };
+    File.WriteAllBytes(opaqueFile, opaqueBytes);
+    var payload = Path.Combine(folder, "textures", "body.dds");
+    Directory.CreateDirectory(Path.GetDirectoryName(payload)!);
+    File.WriteAllBytes(payload, new byte[] { 9, 8, 7 });
+
+    var nestedFolder = Path.Combine(folder, "nested");
+    Directory.CreateDirectory(nestedFolder);
+    File.WriteAllText(Path.Combine(nestedFolder, "mod.ini"), "[Mod]\nid=nested\n");
+    var mods = ModService.Scan(game);
+    var mod = mods.Single(item => item.Id == "stable-lzy");
+    var nested = mods.Single(item => item.Id == "nested");
+    ModService.Rename(modsRoot, mod, "Arcane Exotic Dancer", mods);
+
+    var renamedFolder = Path.Combine(modsRoot, "Arcane Exotic Dancer");
+    var renamedIni = Path.Combine(renamedFolder, "mod.ini");
+    if (Directory.Exists(folder) || !Directory.Exists(renamedFolder) || mod.Folder != renamedFolder || mod.IniPath != renamedIni)
+        throw new InvalidOperationException("Mod rename did not move the folder and update the scanned entry paths.");
+    if (mod.Name != "Arcane Exotic Dancer" || mod.Id != "stable-lzy")
+        throw new InvalidOperationException("Mod rename did not update its name while preserving its stable ID.");
+    var expectedIni = originalIni.Replace("name = Old Name  ", "name = Arcane Exotic Dancer  ", StringComparison.Ordinal);
+    var renamedBytes = File.ReadAllBytes(renamedIni);
+    if (!renamedBytes.AsSpan().StartsWith(preamble) || utf8.GetString(renamedBytes, preamble.Length, renamedBytes.Length - preamble.Length) != expectedIni)
+        throw new InvalidOperationException("Mod rename did not preserve the INI encoding, line endings, unrelated sections, or comments.");
+    if (!File.ReadAllBytes(Path.Combine(renamedFolder, "untouched.dat")).SequenceEqual(opaqueBytes) ||
+        !File.ReadAllBytes(Path.Combine(renamedFolder, "textures", "body.dds")).SequenceEqual(new byte[] { 9, 8, 7 }))
+        throw new InvalidOperationException("Mod rename changed or lost files inside the package.");
+    if (nested.Folder != Path.Combine(renamedFolder, "nested") || !File.Exists(nested.IniPath))
+        throw new InvalidOperationException("Renaming a parent Mod did not update nested Mod paths.");
+    if (ModService.Scan(game).Single(item => item.Id == "stable-lzy").Name != "Arcane Exotic Dancer")
+        throw new InvalidOperationException("A fresh scan did not read the renamed value from mod.ini.");
+
+    var occupied = Path.Combine(modsRoot, "Occupied");
+    var collision = Path.Combine(modsRoot, "collision");
+    Directory.CreateDirectory(occupied);
+    Directory.CreateDirectory(collision);
+    var collisionIni = Path.Combine(collision, "mod.ini");
+    const string collisionContents = "[Mod]\nid=collision\n";
+    File.WriteAllText(collisionIni, collisionContents);
+    var collisionMod = ModService.Scan(game).Single(item => item.Id == "collision");
+    var collisionRejected = false;
+    try { ModService.Rename(modsRoot, collisionMod, "Occupied", ModService.Scan(game)); }
+    catch (IOException) { collisionRejected = true; }
+    if (!collisionRejected || !File.Exists(collisionIni) || File.ReadAllText(collisionIni) != collisionContents)
+        throw new InvalidOperationException("A folder-name collision changed the Mod INI or moved its source folder.");
+
+    var emptyRejected = false;
+    try { ModService.Rename(modsRoot, mod, "  ", ModService.Scan(game)); }
+    catch (IOException) { emptyRejected = true; }
+    if (!emptyRejected || !Directory.Exists(renamedFolder))
+        throw new InvalidOperationException("An empty Mod name was accepted or moved the package.");
+
+    var unnamedFolder = Path.Combine(modsRoot, "unnamed");
+    Directory.CreateDirectory(unnamedFolder);
+    var unnamedIni = Path.Combine(unnamedFolder, "mod.ini");
+    const string unnamedContents = "[Mod]\nformat=3\nid=unnamed\n\n[Other]\nname=other-section\n";
+    File.WriteAllText(unnamedIni, unnamedContents);
+    var unnamedMod = ModService.Scan(game).Single(item => item.Id == "unnamed");
+    ModService.Rename(modsRoot, unnamedMod, "Readable Name", ModService.Scan(game));
+    var renamedUnnamedIni = Path.Combine(modsRoot, "Readable Name", "mod.ini");
+    if (File.ReadAllText(renamedUnnamedIni) != unnamedContents ||
+        ModService.Scan(game).Single(item => item.Id == "unnamed").Name != "Readable Name")
+        throw new InvalidOperationException("Renaming a Mod without display-name metadata wrote an unsupported INI key or failed to use the folder name.");
+
+    var titledFolder = Path.Combine(modsRoot, "titled");
+    Directory.CreateDirectory(titledFolder);
+    File.WriteAllText(Path.Combine(titledFolder, "mod.ini"), "[Mod]\nformat=3\nid=titled\ntitle = Previous Title  \n");
+    var titledMod = ModService.Scan(game).Single(item => item.Id == "titled");
+    ModService.Rename(modsRoot, titledMod, "Updated Title", ModService.Scan(game));
+    if (!File.ReadAllText(Path.Combine(modsRoot, "Updated Title", "mod.ini")).Contains("title = Updated Title  ", StringComparison.Ordinal))
+        throw new InvalidOperationException("Renaming a Mod with title metadata did not update the existing display-name field.");
+    Console.WriteLine("PASS: Mod rename updates the folder and mod.ini together, preserves package files/IDs, and rejects collisions.");
 }
 
 static async Task VerifyManagerUpdateApplyTransaction(string fixtureRoot)

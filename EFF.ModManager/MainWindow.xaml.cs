@@ -16,6 +16,7 @@ public partial class MainWindow : Window
     private readonly CancellationTokenSource _shutdown = new();
     private readonly SemaphoreSlim _updateCheckGate = new(1, 1);
     private List<ModEntry> _allMods = [];
+    private readonly HashSet<ModEntry> _cancelModNameEdits = [];
     private bool _initializing = true;
     private bool _busy;
     private bool _repairSelectionSweepActive;
@@ -542,6 +543,45 @@ public partial class MainWindow : Window
     {
         if (ModsList.SelectedItem is not ModEntry mod) { ClearDetails(); return; }
         ShowDetails(mod);
+    }
+
+    private void ModNameEditor_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (sender is not TextBox editor || editor.DataContext is not ModEntry mod || !HasGame) return;
+        if (_cancelModNameEdits.Remove(mod)) return;
+        var editedName = editor.Text.Trim();
+        if (string.Equals(editedName, mod.Name, StringComparison.Ordinal) &&
+            string.Equals(Path.GetFileName(mod.Folder), editedName, StringComparison.Ordinal)) return;
+
+        try
+        {
+            ModService.Rename(ModService.ModsRoot(GamePath), mod, editedName, _allMods);
+            if (ModsList.SelectedItem is ModEntry selected && ReferenceEquals(selected, mod)) ShowDetails(mod);
+            SetStatus(T("mods.nameSaved") + ": " + mod.Name);
+        }
+        catch (Exception error)
+        {
+            editor.Text = mod.Name;
+            SetStatus(error.Message);
+            MessageBox.Show(this, error.Message, T("dialog.title"), MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void ModNameEditor_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (sender is not TextBox editor || editor.DataContext is not ModEntry mod) return;
+        if (e.Key == Key.Escape)
+        {
+            editor.Text = mod.Name;
+            _cancelModNameEdits.Add(mod);
+            editor.MoveFocus(new TraversalRequest(FocusNavigationDirection.Next));
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Enter)
+        {
+            editor.MoveFocus(new TraversalRequest(FocusNavigationDirection.Next));
+            e.Handled = true;
+        }
     }
 
     private void ShowDetails(ModEntry mod)

@@ -15,13 +15,23 @@ internal sealed class AppSettings
 internal sealed class ModEntry : INotifyPropertyChanged
 {
     private bool _isRepairSelected = true;
+    private string _name = "";
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public string Folder { get; init; } = "";
-    public string IniPath { get; init; } = "";
+    public string Folder { get; set; } = "";
+    public string IniPath { get; set; } = "";
     public string Id { get; init; } = "";
-    public string Name { get; init; } = "";
+    public string Name
+    {
+        get => _name;
+        set
+        {
+            if (_name == value) return;
+            _name = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Name)));
+        }
+    }
     public string Author { get; init; } = "";
     public string Version { get; init; } = "";
     public string Description { get; init; } = "";

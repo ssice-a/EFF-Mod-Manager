@@ -150,7 +150,14 @@
             <DataGrid x:Name="ModsList" Grid.Row="1" Grid.Column="0" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="False" SelectionMode="Single" SelectionUnit="FullRow" SelectionChanged="ModsList_SelectionChanged" Margin="0,0,8,0">
               <DataGrid.Columns>
                 <DataGridTemplateColumn Width="58"><DataGridTemplateColumn.Header><TextBlock Text="{Binding [mods.state], Source={x:Static local:LanguageService.Instance}}" /></DataGridTemplateColumn.Header><DataGridTemplateColumn.CellTemplate><DataTemplate><CheckBox IsChecked="{Binding IsEnabled, Mode=OneWay}" Click="ModEnabled_Click" HorizontalAlignment="Center" VerticalAlignment="Center" /></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
-                <DataGridTextColumn Width="*" Binding="{Binding Name}" ElementStyle="{StaticResource DataGridTextCell}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.name], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
+                <DataGridTemplateColumn Width="*">
+                  <DataGridTemplateColumn.Header><TextBlock Text="{Binding [mods.name], Source={x:Static local:LanguageService.Instance}}" /></DataGridTemplateColumn.Header>
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <TextBox Text="{Binding Name, Mode=OneWay}" MaxLength="80" Height="30" Style="{StaticResource ModNameEditor}" ToolTip="{Binding [mods.nameEditHint], Source={x:Static local:LanguageService.Instance}}" LostFocus="ModNameEditor_LostFocus" PreviewKeyDown="ModNameEditor_KeyDown" />
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
                 <DataGridTextColumn Width="125" Binding="{Binding Author}" ElementStyle="{StaticResource DataGridTextCell}" IsReadOnly="True"><DataGridTextColumn.Header><TextBlock Text="{Binding [mods.author], Source={x:Static local:LanguageService.Instance}}" /></DataGridTextColumn.Header></DataGridTextColumn>
               </DataGrid.Columns>
             </DataGrid>
