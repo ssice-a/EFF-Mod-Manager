@@ -17,8 +17,14 @@ Directory.CreateDirectory(Path.GetDirectoryName(input)!);
 
 try
 {
+    if (args.Contains("--manager-update-apply"))
+    {
+        await VerifyManagerUpdateApplyTransaction(fixture);
+        return;
+    }
     VerifyEmptyResourceRootStartupSetting();
     VerifyManagerUpdateCacheLocation();
+    await UpdateCheckTests.RunAsync();
     await VerifyManagerUpdateCache(fixture);
     await VerifyManagerUpdateApplyTransaction(fixture);
     VerifyUnpackedWorkspaceLookup(fixture);
@@ -79,10 +85,32 @@ try
     ModService.SetEnabled(disabled, true);
     if (!Single(ModService.Scan(game)).IsEnabled) throw new InvalidOperationException("Enable did not restore the runtime descriptor.");
 
-    var duplicateRejected = false;
-    try { await ModService.ImportAsync(input, game, CancellationToken.None); }
-    catch (IOException) { duplicateRejected = true; }
-    if (!duplicateRejected) throw new InvalidOperationException("Duplicate Mod ID was accepted.");
+    var firstDescriptor = File.ReadAllBytes(mod.IniPath);
+    await ModService.ImportAsync(input, game, CancellationToken.None);
+    var authorCopies = ModService.Scan(game).Where(item => item.Id == mod.Id).ToArray();
+    if (authorCopies.Length != 2 || authorCopies.Select(item => item.Folder).Distinct(StringComparer.OrdinalIgnoreCase).Count() != 2 ||
+        !firstDescriptor.SequenceEqual(File.ReadAllBytes(mod.IniPath)))
+        throw new InvalidOperationException("Installing another author copy did not create an independent installation while preserving the first.");
+    ModService.SetEnabled(authorCopies.Single(item => item.Folder != mod.Folder), false);
+    if (!ModService.Scan(game).Single(item => item.Folder == mod.Folder).IsEnabled)
+        throw new InvalidOperationException("Disabling an author copy disabled its other installation.");
+
+    var multiCopyZip = Path.Combine(fixture, "same-author-targets.zip");
+    CreateZip(multiCopyZip,
+        ("TargetA/mod.ini", "[Mod]\nformat=3\nid=SharedWeapon\nname=Weapon A\n"),
+        ("TargetA/textures/shared.dds", "first author copy"),
+        ("TargetB/mod.ini", "[Mod]\nformat=3\nid=SharedWeapon\nname=Weapon B\n"),
+        ("TargetB/textures/shared.dds", "second author copy"));
+    await ModService.ImportAsync(multiCopyZip, game, CancellationToken.None);
+    var sameAuthorTargets = ModService.Scan(game).Where(item => item.Id == "SharedWeapon").ToArray();
+    if (sameAuthorTargets.Length != 2 ||
+        sameAuthorTargets.Select(item => item.Folder).Distinct(StringComparer.OrdinalIgnoreCase).Count() != 2 ||
+        sameAuthorTargets.Select(item => File.ReadAllText(Path.Combine(item.Folder, "textures", "shared.dds")))
+            .Distinct(StringComparer.Ordinal).Count() != 2)
+        throw new InvalidOperationException("A ZIP containing multiple same-ID installations lost an installation or mixed their resources.");
+    ModService.SetEnabled(sameAuthorTargets[0], false);
+    if (!ModService.Scan(game).Single(item => item.Folder == sameAuthorTargets[1].Folder).IsEnabled)
+        throw new InvalidOperationException("Toggling a same-ID package entry changed another installation in that ZIP.");
 
     var unsafeZip = Path.Combine(fixture, "unsafe.zip");
     CreateZip(unsafeZip, ("../escaped.txt", "outside"), ("Pack/mod.ini", "[Mod]\nid=Unsafe"));
@@ -103,7 +131,7 @@ try
     if (!deleteProtected) throw new InvalidOperationException("Deleting a parent package removed a nested Mod.");
     Directory.Delete(parent, true);
 
-    Console.WriteLine("PASS: ZIP install, metadata, default enabled state, enable/disable, duplicate IDs, path traversal, and nested deletion protection.");
+    Console.WriteLine("PASS: ZIP install, metadata, enable/disable, independent author copies, path traversal, and nested deletion protection.");
 }
 finally
 {
@@ -284,6 +312,36 @@ static async Task VerifyManagerUpdateApplyTransaction(string fixtureRoot)
     var powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
     if (!File.Exists(powershell)) throw new FileNotFoundException("Windows PowerShell is required for the Manager update handoff test.", powershell);
 
+    var fixtureExe = Path.Combine(fixtureRoot, "ManagerUpdateFixture.exe");
+    var fixtureSource = Path.Combine(fixtureRoot, "ManagerUpdateFixture.cs");
+    await File.WriteAllTextAsync(fixtureSource, """
+        using System;
+        using System.Diagnostics;
+        using System.IO;
+        using System.Threading;
+        internal static class ManagerUpdateFixture
+        {
+            private static void Main()
+            {
+                var root = AppDomain.CurrentDomain.BaseDirectory;
+                File.WriteAllText(Path.Combine(root, "fixture.started"), Process.GetCurrentProcess().Id + "\n" + Environment.CurrentDirectory);
+                if (!File.Exists(Path.Combine(root, "fixture.exit-immediately"))) Thread.Sleep(7000);
+            }
+        }
+        """);
+    var compile = new ProcessStartInfo(powershell)
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        ArgumentList = { "-NoProfile", "-Command", "Add-Type -Path '" + fixtureSource.Replace("'", "''") + "' -OutputAssembly '" + fixtureExe.Replace("'", "''") + "' -OutputType WindowsApplication" }
+    };
+    await RunHelper(compile, expectSuccess: true);
+
+    await VerifySuccessfulUpdate("manager-update-apply-success", includeSupportFiles: true);
+    await VerifySuccessfulUpdate("manager-update-apply-exe-only", includeSupportFiles: false);
+
     var stage = Path.Combine(fixtureRoot, "manager-update-apply-failure");
     var unpacked = Path.Combine(stage, "unpacked");
     var target = Path.Combine(fixtureRoot, "manager-update-install");
@@ -291,39 +349,114 @@ static async Task VerifyManagerUpdateApplyTransaction(string fixtureRoot)
     await File.WriteAllTextAsync(cachedPackage, "verified package retained after apply failure");
     Directory.CreateDirectory(unpacked);
     Directory.CreateDirectory(target);
-    File.WriteAllText(Path.Combine(unpacked, "EFF.ModManager.exe"), "not an executable");
+    File.Copy(fixtureExe, Path.Combine(unpacked, "EFF.ModManager.exe"));
     File.WriteAllText(Path.Combine(unpacked, "EFF.ModManager.runtimeconfig.json"), "new runtime config");
+    File.WriteAllText(Path.Combine(unpacked, "fixture.exit-immediately"), "fail the startup health check");
+    Directory.CreateDirectory(Path.Combine(unpacked, "native", "nested"));
+    File.WriteAllText(Path.Combine(unpacked, "native", "nested", "decoder.dll"), "new native dependency");
     File.WriteAllText(Path.Combine(target, "EFF.ModManager.exe"), "old executable");
     File.WriteAllText(Path.Combine(target, "EFF.ModManager.runtimeconfig.json"), "old runtime config");
     var script = Path.Combine(stage, "apply-update.ps1");
     await File.WriteAllTextAsync(script,
-        ManagerUpdateService.BuildScript(stage, unpacked, target, "EFF.ModManager.exe", 0, showFailureUi: false));
-    using (var process = Process.Start(new ProcessStartInfo(powershell)
+        ManagerUpdateService.BuildScript(stage, unpacked, target, "EFF.ModManager.exe", 0, showFailureUi: false), new UTF8Encoding(true));
+    await RunHelper(new ProcessStartInfo(powershell)
     {
         UseShellExecute = false,
         CreateNoWindow = true,
         RedirectStandardOutput = true,
         RedirectStandardError = true,
         ArgumentList = { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script }
-    }) ?? throw new IOException("Could not start the isolated Manager update transaction test."))
-    {
-        var standardOutput = process.StandardOutput.ReadToEndAsync();
-        var standardError = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        if (process.ExitCode == 0) throw new InvalidOperationException("A non-executable Manager update was reported as successful. " + await standardOutput + await standardError);
-        var output = await standardOutput + await standardError;
-        if (output.Length > 0) Console.WriteLine("Manager update helper output: " + output);
-    }
+    }, expectSuccess: false);
 
     if (File.ReadAllText(Path.Combine(target, "EFF.ModManager.exe")) != "old executable" ||
         File.ReadAllText(Path.Combine(target, "EFF.ModManager.runtimeconfig.json")) != "old runtime config")
         throw new InvalidOperationException("A failed Manager update did not restore its previous files.");
     var log = Path.Combine(stage, "update.log");
-    if (!File.Exists(log) || !File.ReadAllText(log).Contains("Manager update failed", StringComparison.Ordinal))
+    if (!File.Exists(log) || !File.ReadAllText(log).Contains("Updated Manager exited during startup.", StringComparison.Ordinal) ||
+        !File.Exists(Path.Combine(target, "fixture.started")))
         throw new InvalidOperationException("A failed Manager update did not retain its diagnostic log and failed stage.");
+    if (File.Exists(Path.Combine(target, "fixture.exit-immediately")) || File.Exists(Path.Combine(target, "native", "nested", "decoder.dll")))
+        throw new InvalidOperationException("A failed Manager update retained newly installed support files after rollback.");
     if (!File.Exists(cachedPackage) || File.ReadAllText(cachedPackage) != "verified package retained after apply failure")
         throw new InvalidOperationException("A failed Manager update removed its verified cached package.");
     Console.WriteLine("PASS: failed Manager replacement rolls back files, retains its diagnostic log, and leaves the verified package cached.");
+
+    async Task VerifySuccessfulUpdate(string name, bool includeSupportFiles)
+    {
+        var successStage = Path.Combine(fixtureRoot, name);
+        var successSource = Path.Combine(successStage, "unpacked");
+        var successTarget = Path.Combine(fixtureRoot, name + " install 'quoted' 中文");
+        Directory.CreateDirectory(successSource);
+        Directory.CreateDirectory(successTarget);
+        File.Copy(fixtureExe, Path.Combine(successSource, "EFF.ModManager.exe"));
+        File.WriteAllText(Path.Combine(successTarget, "EFF.ModManager.exe"), "old executable");
+        File.WriteAllText(Path.Combine(successTarget, "preserved.settings"), "keep user configuration");
+        if (includeSupportFiles)
+        {
+            File.WriteAllText(Path.Combine(successSource, "EFF.ModManager.runtimeconfig.json"), "new runtime config");
+            File.WriteAllText(Path.Combine(successTarget, "EFF.ModManager.runtimeconfig.json"), "old runtime config");
+            Directory.CreateDirectory(Path.Combine(successSource, "native", "nested"));
+            File.WriteAllText(Path.Combine(successSource, "native", "nested", "decoder.dll"), "new native dependency");
+        }
+        var successScript = Path.Combine(successStage, "apply-update.ps1");
+        await File.WriteAllTextAsync(successScript,
+            ManagerUpdateService.BuildScript(successStage, successSource, successTarget, "EFF.ModManager.exe", 0, showFailureUi: false), new UTF8Encoding(true));
+        try
+        {
+            await RunHelper(new ProcessStartInfo(powershell)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                WorkingDirectory = successStage,
+                ArgumentList = { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", successScript }
+            }, expectSuccess: true);
+            if (Directory.Exists(successStage))
+                throw new InvalidOperationException("A successful Manager update retained its staging folder. " +
+                    (File.Exists(Path.Combine(successStage, "update.log")) ? File.ReadAllText(Path.Combine(successStage, "update.log")) : ""));
+            if (!File.ReadAllBytes(Path.Combine(successTarget, "EFF.ModManager.exe")).SequenceEqual(File.ReadAllBytes(fixtureExe)) ||
+                File.ReadAllText(Path.Combine(successTarget, "preserved.settings")) != "keep user configuration")
+                throw new InvalidOperationException("A successful Manager update lost its executable or unrelated user files.");
+            if (includeSupportFiles && (File.ReadAllText(Path.Combine(successTarget, "EFF.ModManager.runtimeconfig.json")) != "new runtime config" ||
+                File.ReadAllText(Path.Combine(successTarget, "native", "nested", "decoder.dll")) != "new native dependency"))
+                throw new InvalidOperationException("A successful Manager update did not apply its support files and nested dependency.");
+            var started = File.ReadAllLines(Path.Combine(successTarget, "fixture.started"));
+            if (started.Length != 2 || !string.Equals(started[1], successTarget, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The updated Manager did not start from its installation directory.");
+        }
+        finally
+        {
+            var marker = Path.Combine(successTarget, "fixture.started");
+            if (File.Exists(marker) && int.TryParse(File.ReadLines(marker).FirstOrDefault(), out var pid))
+            {
+                try
+                {
+                    using var launched = Process.GetProcessById(pid);
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                    await launched.WaitForExitAsync(timeout.Token);
+                }
+                catch (ArgumentException) { }
+            }
+        }
+        Console.WriteLine("PASS: real Windows PowerShell applies and starts a Manager update" + (includeSupportFiles ? " with support files and nested dependencies." : " containing only the executable."));
+    }
+
+    static async Task RunHelper(ProcessStartInfo start, bool expectSuccess)
+    {
+        using var process = Process.Start(start) ?? throw new IOException("Could not start the isolated Manager update transaction test.");
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await process.WaitForExitAsync(timeout.Token);
+        var output = await standardOutput + await standardError;
+        if ((process.ExitCode == 0) != expectSuccess)
+        {
+            var log = Path.Combine(start.WorkingDirectory, "update.log");
+            throw new InvalidOperationException("Manager update helper returned " + process.ExitCode + ". " + output + (File.Exists(log) ? File.ReadAllText(log) : ""));
+        }
+        if (output.Length > 0) Console.WriteLine("Manager update helper output: " + output);
+    }
 }
 
 static void VerifyCompiledModCacheMigration(string fixtureRoot)
@@ -536,20 +669,39 @@ static void VerifyLegacyMigrationBatch(string fixtureRoot)
 
     var conflictBackup = Path.Combine(root, "conflict-backup");
     var conflictStage = Path.Combine(mods, ".effmm-migration-conflict");
-    var conflictSource = Path.Combine(conflictBackup, "Beta");
+    var conflictSource = Path.Combine(conflictBackup, "Alpha");
     Directory.CreateDirectory(conflictSource);
-    Directory.CreateDirectory(Path.Combine(conflictStage, "Beta"));
-    File.WriteAllText(Path.Combine(conflictSource, "mod.ini"), "[Mod]\nformat=2\nid=Beta\n");
-    File.WriteAllText(Path.Combine(conflictStage, "Beta", "mod.ini"), "[Mod]\nformat=3\nid=Beta\n");
+    Directory.CreateDirectory(Path.Combine(conflictStage, "Alpha"));
+    File.WriteAllText(Path.Combine(conflictSource, "mod.ini"), "[Mod]\nformat=2\nid=Alpha\n");
+    File.WriteAllText(Path.Combine(conflictStage, "Alpha", "mod.ini"), "[Mod]\nformat=3\nid=Alpha\n");
     var conflictSources = LegacyMigrationService.InspectBackup(conflictBackup);
-    var installedConflict = Path.Combine(mods, "ExistingBeta");
-    Directory.CreateDirectory(installedConflict);
-    File.WriteAllText(Path.Combine(installedConflict, "mod.ini"), "[Mod]\nformat=3\nid=Beta\n");
-    var rejected = false;
-    try { LegacyMigrationService.PublishBatch(mods, conflictStage, conflictSources); }
-    catch (IOException) { rejected = true; }
-    if (!rejected || !Directory.Exists(Path.Combine(conflictStage, "Beta")) || !File.Exists(Path.Combine(conflictSource, "mod.ini")))
-        throw new InvalidOperationException("An installed ID conflict changed backup or staged migration data.");
+    var originalBytes = File.ReadAllBytes(Path.Combine(mods, "Alpha", "mod.ini"));
+    LegacyMigrationService.PublishBatch(mods, conflictStage, conflictSources);
+    if (!File.Exists(Path.Combine(mods, "Alpha 2", "mod.ini")) ||
+        !originalBytes.SequenceEqual(File.ReadAllBytes(Path.Combine(mods, "Alpha", "mod.ini"))) ||
+        !File.Exists(Path.Combine(conflictSource, "mod.ini")))
+        throw new InvalidOperationException("Migrating another author copy did not allocate a unique installation and preserve the existing Mod and backup.");
+
+    var repeatedBackup = Path.Combine(root, "same-author-backup");
+    var repeatedStage = Path.Combine(mods, ".effmm-same-author-stage");
+    foreach (var name in new[] { "TargetA", "TargetB" })
+    {
+        Directory.CreateDirectory(Path.Combine(repeatedBackup, name));
+        Directory.CreateDirectory(Path.Combine(repeatedStage, name));
+        File.WriteAllText(Path.Combine(repeatedBackup, name, "mod.ini"), "[Mod]\nformat=2\nid=SharedWeapon\nname=" + name + "\n");
+        File.WriteAllText(Path.Combine(repeatedStage, name, "mod.ini"), "[Mod]\nformat=3\nid=SharedWeapon\nname=" + name + "\n");
+        File.WriteAllText(Path.Combine(repeatedStage, name, "author.dat"), name);
+    }
+    var repeatedSources = LegacyMigrationService.InspectBackup(repeatedBackup);
+    if (repeatedSources.Count != 2 || repeatedSources.Any(item => item.Id != "SharedWeapon"))
+        throw new InvalidOperationException("A backup containing same-ID installations was rejected or deduplicated by author ID.");
+    LegacyMigrationService.PublishBatch(mods, repeatedStage, repeatedSources);
+    var repeatedInstalled = ModService.ScanTree(mods).Where(item => item.Id == "SharedWeapon").ToArray();
+    if (repeatedInstalled.Length != 2 || repeatedInstalled.Any(item => item.Format != "3") ||
+        repeatedInstalled.Select(item => File.ReadAllText(Path.Combine(item.Folder, "author.dat")))
+            .Distinct(StringComparer.Ordinal).Count() != 2 ||
+        ModService.ScanTree(repeatedBackup).Count(item => item.Format == "2") != 2)
+        throw new InvalidOperationException("A same-ID migration batch mixed installations or changed the original backups.");
 
     var installedLegacy = Path.Combine(mods, "Gamma");
     var replacementStage = Path.Combine(mods, ".effmm-replacement-stage");
@@ -574,7 +726,40 @@ static void VerifyLegacyMigrationBatch(string fixtureRoot)
         File.ReadAllText(rollbackFile) != "rollback copy")
         throw new InvalidOperationException("Repair migration did not publish Format 3 while preserving the old Format 2 folder.");
 
-    Console.WriteLine("PASS: legacy migration validates Format 2 inputs, publishes Format 3 output, preserves backups, and blocks duplicate IDs.");
+    var rollbackStage = Path.Combine(mods, ".effmm-rollback-stage");
+    var rollbackOriginal = Path.Combine(mods, "RollbackA");
+    Directory.CreateDirectory(rollbackOriginal);
+    var rollbackIni = "[Mod]\nformat=2\nid=SharedRollback\n";
+    File.WriteAllText(Path.Combine(rollbackOriginal, "mod.ini"), rollbackIni);
+    File.WriteAllText(Path.Combine(rollbackOriginal, "original.dat"), "keep this original");
+    var rollbackSources = new[]
+    {
+        new LegacyModSource("RollbackA", "SharedRollback", "RollbackA"),
+        new LegacyModSource("RollbackB", "SharedRollback", "RollbackB")
+    };
+    foreach (var source in rollbackSources)
+    {
+        Directory.CreateDirectory(Path.Combine(rollbackStage, source.FolderName));
+        File.WriteAllText(Path.Combine(rollbackStage, source.FolderName, "mod.ini"), "[Mod]\nformat=3\nid=SharedRollback\n");
+    }
+    var rollbackRejected = false;
+    try
+    {
+        LegacyMigrationService.PublishReplacements(mods, rollbackStage, rollbackSources,
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["RollbackA"] = rollbackOriginal,
+                ["RollbackB"] = Path.Combine(mods, "missing-selected-installation")
+            }, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+    }
+    catch (IOException error) when (error.Message.Contains("Original Mods were restored", StringComparison.Ordinal))
+    { rollbackRejected = true; }
+    if (!rollbackRejected || File.ReadAllText(Path.Combine(rollbackOriginal, "mod.ini")) != rollbackIni ||
+        File.ReadAllText(Path.Combine(rollbackOriginal, "original.dat")) != "keep this original" ||
+        rollbackSources.Any(source => !File.Exists(Path.Combine(rollbackStage, source.FolderName, "mod.ini"))))
+        throw new InvalidOperationException("A failed same-ID replacement batch did not restore its earlier installation and retain staged outputs.");
+
+    Console.WriteLine("PASS: legacy migration validates Format 2 inputs, publishes independent author copies, and preserves originals and backups.");
 }
 
 static void VerifyFormat2RepairRequiresMigration(string fixtureRoot)
@@ -852,64 +1037,32 @@ static async Task VerifyLiveRepairAsync(string fixtureRoot)
 {
     var settings = SettingsStore.Load();
     var game = Path.GetFullPath(settings.GamePath);
-    var resourceRoot = Path.GetFullPath(settings.ResourceRoot);
     var originalMod = Path.Combine(ModService.ModsRoot(game), "LZY");
-    var externalDll = Path.Combine(game, "plugin", "eff.dll");
-    if (!GameDiscovery.IsGame(game) || !Directory.Exists(originalMod) || !File.Exists(externalDll))
-        throw new InvalidOperationException("The configured game, manually installed EFF DLL, or LZY test Mod was not found.");
-    if (DllInstallService.IsManaged(game))
-        throw new InvalidOperationException("This integration test requires the EFF DLL to be installed manually, without a manager manifest.");
-
-    var workspace = Path.Combine(fixtureRoot, "repair-workspace");
-    var workspaceIndex = Path.Combine(workspace, "index");
-    Directory.CreateDirectory(workspaceIndex);
-    foreach (var name in new[] { "endfield_assets.eidx", "endfield_assets.eidx.bundles", "endfield-index-manifest.json" })
-        File.Copy(Path.Combine(resourceRoot, "index", name), Path.Combine(workspaceIndex, name));
-
+    if (!GameDiscovery.IsGame(game) || !Directory.Exists(originalMod))
+        throw new InvalidOperationException("The configured game or LZY test Mod was not found.");
+    ModService.RequireFormat3(originalMod);
     var modCopy = Path.Combine(fixtureRoot, "repair-mod", "LZY");
     CopyDirectoryForTest(originalMod, modCopy);
-    File.WriteAllBytes(Path.Combine(modCopy, "compiled.bin"), System.Text.Encoding.ASCII.GetBytes("EFF_MOD_BLOCKS/1"));
-    File.Delete(Path.Combine(modCopy, "source-inputs.bin"));
-    var oldBlocks = Path.Combine(modCopy, "compiled.blocks");
-    if (Directory.Exists(oldBlocks)) Directory.Delete(oldBlocks, recursive: true);
+    string[] Snapshot() => Directory.EnumerateFiles(modCopy, "*", SearchOption.AllDirectories)
+        .Order(StringComparer.OrdinalIgnoreCase)
+        .Select(path => Path.GetRelativePath(modCopy, path) + ":" + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))))
+        .ToArray();
+    var before = Snapshot();
     var appAssemblyPath = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "EFF.ModManager", "bin", "Release", "net9.0-windows", "EFF.ModManager.dll"));
     var app = System.Reflection.Assembly.LoadFrom(appAssemblyPath);
-    var archiveType = app.GetType("AnimeStudio.GUI.EndfieldVfsArchive", throwOnError: true)!;
-    var archive = archiveType.GetMethod("Open", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!
-        .Invoke(null, [game])!;
-    var builder = app.GetType("AnimeStudio.GUI.EndfieldVfsAssetIndexBuilder", throwOnError: true)!;
-    var bind = builder.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
-        .Single(method => method.Name == "TryGetOrRebindCurrentIndex" && method.GetParameters().Length == 4);
-    var bindArguments = new object?[] { archive, workspace, null, CancellationToken.None };
-    if (!(bool)bind.Invoke(null, bindArguments)!)
-        throw new InvalidOperationException("The copied unpacker index cannot be bound to the installed game's Bundle content.");
-
-    var stateMethod = app.GetType("EffRepair.RepairService", throwOnError: true)!
-        .GetMethod("StatePath", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
-    var receipt = (string)stateMethod.Invoke(null, [modCopy])!;
-    var receiptExisted = File.Exists(receipt);
     var progressLines = new List<string>();
     var progress = new InlineProgress<string>(progressLines.Add);
-    var repairService = app.GetType("EffModManager.IntegratedRepairService", throwOnError: true)!;
-    var repair = repairService.GetMethod("RepairAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
-    var task = (Task)repair.Invoke(null, [game, workspace, new[] { modCopy }, progress, CancellationToken.None])!;
-    try
-    {
-        await task;
-        var result = task.GetType().GetProperty("Result")!.GetValue(task)!;
-        var repaired = (int)result.GetType().GetProperty("Repaired")!.GetValue(result)!;
-        var failed = (int)result.GetType().GetProperty("Failed")!.GetValue(result)!;
-        if (repaired != 1 || failed != 0 || !File.Exists(Path.Combine(modCopy, "compiled.bin")) || !File.Exists(Path.Combine(modCopy, "source-inputs.bin")) ||
-            CompiledModCache.Detect(modCopy) != CompiledModCacheKind.CurrentBlockStore)
-            throw new InvalidOperationException("Integrated repair did not complete successfully: " + string.Join(" | ", progressLines.Where(line => !line.Contains("COMPILED-MOD-COST", StringComparison.Ordinal))));
-        Console.WriteLine("PASS: integrated repair cold-migrated a copied legacy LZY package from the current index; the installed Mod was left untouched.");
-    }
-    finally
-    {
-        if (!receiptExisted && File.Exists(receipt)) File.Delete(receipt);
-    }
+    var service = app.GetType("EffModManager.IntegratedRepairService", throwOnError: true)!;
+    var repair = service.GetMethod("RepairAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+    var task = (Task)repair.Invoke(null, [game, "", new[] { modCopy }, progress, CancellationToken.None])!;
+    await task;
+    var result = task.GetType().GetProperty("Result")!.GetValue(task)!;
+    var repaired = (int)result.GetType().GetProperty("Repaired")!.GetValue(result)!;
+    var failed = (int)result.GetType().GetProperty("Failed")!.GetValue(result)!;
+    if (repaired != 1 || failed != 0 || !before.SequenceEqual(Snapshot()))
+        throw new InvalidOperationException("Integrated Format 3 validation failed or changed author files: " + string.Join(" | ", progressLines));
+    Console.WriteLine("PASS: actual service validated a copy of the installed Format 3 LZY Mod without an index or offline cache rebuild; installed Mod was untouched.");
 }
-
 static void CopyDirectoryForTest(string source, string destination)
 {
     if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0)

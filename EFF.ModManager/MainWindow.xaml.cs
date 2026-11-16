@@ -353,35 +353,33 @@ public partial class MainWindow : Window
         try
         {
             SetStatus(T("footer.checking"));
-            var updateTask = Task.Run(async () =>
+            var checks = await UpdateCheckService.CheckAsync(
+                DllInstallService.GetLatestVersionAsync, ManagerUpdateService.CheckAsync, _shutdown.Token);
+            var result = (Dll: checks.Dll.Value, Manager: checks.Manager.Value);
+            try
             {
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
-                timeout.CancelAfter(TimeSpan.FromSeconds(20));
-                var dll = await DllInstallService.GetLatestVersionAsync(timeout.Token);
-                var manager = await ManagerUpdateService.CheckAsync(timeout.Token);
-                return (Dll: dll, Manager: manager);
-            }, _shutdown.Token);
-
-            (Version? Dll, (GitHubRelease? Release, GitHubAsset? Asset, Version? Version) Manager) result;
-            try { result = await updateTask; }
-            catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested)
-            {
-                SetStatus(T("status.updateCheckFailed"));
-                ManagerVersionText.Text = T("status.updateCheckFailed");
-                return;
+                SettingsStore.WriteAtomic(Path.Combine(SettingsStore.DataRoot, "update-check.json"),
+                    System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        checkedAtUtc = DateTimeOffset.UtcNow,
+                        dll = new { succeeded = checks.Dll.Succeeded, version = result.Dll?.ToString(), error = checks.Dll.Error?.Message },
+                        manager = new { succeeded = checks.Manager.Succeeded, version = result.Manager.Version?.ToString(), error = checks.Manager.Error?.Message }
+                    }, SettingsStore.JsonOptions));
             }
-            catch (Exception error)
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
-                _latestDll = null;
-                RefreshDllState();
-                SetStatus(T("status.updateCheckFailed"));
-                ManagerVersionText.Text = automatic ? T("status.updateCheckFailed") : error.Message;
-                return;
+                // A diagnostic write must not discard a successful update lookup.
             }
-
+            var failures = new List<string>();
+            if (!checks.Dll.Succeeded) failures.Add("EFF DLL: " + checks.Dll.Error!.Message);
+            if (!checks.Manager.Succeeded) failures.Add("Mod Manager: " + checks.Manager.Error!.Message);
             _latestDll = result.Dll;
             RefreshDllState();
-            if (result.Manager.Release is null)
+            if (!checks.Manager.Succeeded)
+            {
+                ManagerVersionText.Text = "v" + ManagerUpdateService.CurrentVersion.ToString(3) + " · " + checks.Manager.Error!.Message;
+            }
+            else if (result.Manager.Release is null)
             {
                 ManagerVersionText.Text = "v" + ManagerUpdateService.CurrentVersion.ToString(3) + " · " + T("status.managerReleaseMissing");
             }
@@ -444,8 +442,11 @@ public partial class MainWindow : Window
                     _settings.IgnoredDllVersion = "";
                     SettingsStore.Save(_settings);
                 }
-                SetStatus(T("status.updatesChecked"));
+                SetStatus(failures.Count == 0 ? T("status.updatesChecked") :
+                    T("status.updateCheckFailed") + " · " + string.Join(" | ", failures));
             }
+            if (failures.Count > 0)
+                SetStatus(T("status.updateCheckFailed") + " · " + string.Join(" | ", failures));
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
         catch (Exception error)
@@ -749,12 +750,15 @@ public partial class MainWindow : Window
             return;
         }
         var root = ResourceRootBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(root)) { RepairStatusText.Text = T("repair.chooseResources"); return; }
-        if (SettingsStore.IsSystemDrivePath(root)) { RepairStatusText.Text = T("settings.cacheOffSystemDrive"); return; }
+        if (selectedMods.Any(mod => mod.Format == "2"))
+        {
+            if (string.IsNullOrWhiteSpace(root)) { RepairStatusText.Text = T("repair.chooseResources"); return; }
+            if (SettingsStore.IsSystemDrivePath(root)) { RepairStatusText.Text = T("settings.cacheOffSystemDrive"); return; }
+        }
 
         await ExecuteAsync(async () =>
         {
-            Directory.CreateDirectory(root);
+            if (!string.IsNullOrWhiteSpace(root)) Directory.CreateDirectory(root);
             RepairProgressBar.Visibility = Visibility.Visible;
             RepairProgressBar.IsIndeterminate = true;
             RepairButton.IsEnabled = false;
@@ -798,6 +802,25 @@ public partial class MainWindow : Window
                 RepairButton.IsEnabled = true;
             }
         }, showError: false);
+    }
+
+    private async void ImportLocalIndex_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureGame()) return;
+        var root = ResourceRootBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(root)) { RepairStatusText.Text = T("repair.chooseResources"); return; }
+        if (SettingsStore.IsSystemDrivePath(root)) { RepairStatusText.Text = T("settings.cacheOffSystemDrive"); return; }
+        var dialog = new OpenFileDialog { Title = T("repair.importIndex"), Filter = "EFF portable index (*.effindex.gz)|*.effindex.gz", Multiselect = false };
+        if (dialog.ShowDialog(this) != true) return;
+        var game = GamePath;
+        await ExecuteAsync(async () =>
+        {
+            var progress = new Progress<string>(value => RepairStatusText.Text = value);
+            var workspace = await Task.Run(() => IndexAcquisition.ResolveAsync(game, dialog.FileName, root, progress, _shutdown.Token), _shutdown.Token);
+            SharedResources.SetIndexWorkspace(workspace);
+            RepairStatusText.Text = string.Format(T("repair.indexImported"), workspace);
+            SetStatus(RepairStatusText.Text);
+        });
     }
 
     private void SelectAllRepair_Click(object sender, RoutedEventArgs e)

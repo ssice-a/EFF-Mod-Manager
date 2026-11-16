@@ -14,8 +14,7 @@ namespace AnimeStudio.GUI
         long AssetCount, long CabCount, int FailedBundles, long IndexLength, DateTime CreatedUtc,
         string ParserIdentity = null, int ParsedBundles = 0, int ReusedBundles = 0, int RemovedBundles = 0);
 
-    // Shared read-only workspace contract; the repair tool does not include
-    // Unity parsers, index builders, graphics libraries or AnimeStudio UI.
+    // Workspace validation is shared with the local bundled index builder.
     internal static partial class EndfieldVfsAssetIndexBuilder
     {
         public static string GetIndexPath(string workspace) => Path.Combine(Path.GetFullPath(workspace), "index", "endfield_assets.eidx");

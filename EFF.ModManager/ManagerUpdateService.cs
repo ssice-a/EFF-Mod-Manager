@@ -60,7 +60,8 @@ internal static class ManagerUpdateService
             var updatedExe = Path.Combine(unpacked, executableName);
             if (!File.Exists(updatedExe)) throw new InvalidDataException("Manager update does not contain " + executableName);
             var script = Path.Combine(stage, "apply-update.ps1");
-            File.WriteAllText(script, BuildScript(stage, unpacked, installRoot, executableName, Environment.ProcessId), new System.Text.UTF8Encoding(false));
+            // Windows PowerShell 5.1 needs a BOM to read non-ASCII installation paths as UTF-8.
+            File.WriteAllText(script, BuildScript(stage, unpacked, installRoot, executableName, Environment.ProcessId), new System.Text.UTF8Encoding(true));
             var start = new ProcessStartInfo("powershell.exe")
             {
                 UseShellExecute = false,
@@ -116,7 +117,7 @@ internal static class ManagerUpdateService
             "$log=Join-Path $stage 'update.log'",
             "$rollback=Join-Path $stage 'rollback'",
             "$changed=New-Object System.Collections.Generic.List[object]",
-            "function Write-UpdateLog([string]$message) { try { Add-Content -LiteralPath $log -Value ((Get-Date -Format o) + ' ' + $message) } catch {} }",
+            "function Write-UpdateLog([string]$message) { try { Add-Content -LiteralPath $log -Encoding UTF8 -Value ((Get-Date -Format o) + ' ' + $message) } catch {} }",
             "$success=$false",
             "try {",
             "  if ($pidToWait -gt 0) {",
@@ -127,10 +128,16 @@ internal static class ManagerUpdateService
             "  }",
             "  $exePath=Join-Path $source $exe",
             "  if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) { throw 'Update archive is missing the Manager executable.' }",
+            "  $sourcePrefix=[System.IO.Path]::GetFullPath($source).TrimEnd([char[]]@('\\','/')) + [System.IO.Path]::DirectorySeparatorChar",
+            "  $targetPrefix=[System.IO.Path]::GetFullPath($target).TrimEnd([char[]]@('\\','/')) + [System.IO.Path]::DirectorySeparatorChar",
+            "  New-Item -ItemType Directory -Path $rollback -Force | Out-Null",
             "  $files=Get-ChildItem -LiteralPath $source -Force -File -Recurse | Where-Object { $_.FullName -ne $exePath }",
             "  foreach ($file in $files) {",
-            "    $relative=[System.IO.Path]::GetRelativePath($source,$file.FullName)",
-            "    $destination=Join-Path $target $relative",
+            "    $filePath=[System.IO.Path]::GetFullPath($file.FullName)",
+            "    if (-not $filePath.StartsWith($sourcePrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Update file escapes its source folder.' }",
+            "    $relative=$filePath.Substring($sourcePrefix.Length)",
+            "    $destination=[System.IO.Path]::GetFullPath((Join-Path $target $relative))",
+            "    if (-not $destination.StartsWith($targetPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Update file escapes its installation folder.' }",
             "    $backup=Join-Path $rollback $relative",
             "    $parent=Split-Path -Parent $destination",
             "    New-Item -ItemType Directory -Path $parent -Force | Out-Null",
@@ -147,7 +154,7 @@ internal static class ManagerUpdateService
             "  $temporaryExe=$exeDestination + '.effmm-update'",
             "  Copy-Item -LiteralPath $exePath -Destination $temporaryExe -Force",
             "  Move-Item -LiteralPath $temporaryExe -Destination $exeDestination -Force",
-            "  $newProcess=Start-Process -FilePath $exeDestination -PassThru",
+            "  $newProcess=Start-Process -FilePath $exeDestination -WorkingDirectory $target -PassThru",
             "  Start-Sleep -Seconds 5",
             "  $newProcess.Refresh()",
             "  if ($newProcess.HasExited) { throw 'Updated Manager exited during startup.' }",
@@ -164,12 +171,12 @@ internal static class ManagerUpdateService
             "    } catch { Write-UpdateLog ('Rollback failed for ' + $item.Path + ': ' + $_.Exception.Message) }",
             "  }",
             "  if ($showFailureUi) {",
-            "    try { if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) { Start-Process -FilePath (Join-Path $target $exe) } } catch { Write-UpdateLog ('Could not restart previous Manager: ' + $_.Exception.Message) }",
+            "    try { if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) { Start-Process -FilePath (Join-Path $target $exe) -WorkingDirectory $target } } catch { Write-UpdateLog ('Could not restart previous Manager: ' + $_.Exception.Message) }",
             "    try { Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show(('Manager update failed. The previous version was restored when possible.' + [Environment]::NewLine + [Environment]::NewLine + $failure + [Environment]::NewLine + [Environment]::NewLine + 'Log: ' + $log), 'EFF Mod Manager update failed', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null } catch {}",
             "  }",
             "  exit 1",
             "}",
-            "if ($success) { try { Set-Location $env:TEMP; Remove-Item -LiteralPath $stage -Recurse -Force } catch {} }",
+            "if ($success) { try { Set-Location $env:TEMP; [System.Environment]::CurrentDirectory=$env:TEMP; Remove-Item -LiteralPath $stage -Recurse -Force } catch { Write-UpdateLog ('Could not remove update staging folder: ' + $_.Exception.Message) } }",
             ""
         ]);
     }

@@ -116,20 +116,11 @@ internal static class ModService
 
             var found = ScanTree(stage).Where(mod => mod.IsEnabled).ToList();
             if (found.Count == 0) throw new InvalidDataException("The folder or ZIP does not contain mod.ini.");
-            var duplicatedInside = found.GroupBy(mod => mod.Id, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
-            if (duplicatedInside is not null && !string.IsNullOrWhiteSpace(duplicatedInside.Key))
-                throw new InvalidDataException("The package contains duplicate Mod IDs: " + duplicatedInside.Key);
-            var installedIds = Scan(game).Select(mod => mod.Id).Where(id => !string.IsNullOrWhiteSpace(id)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var duplicate = found.Select(mod => mod.Id).FirstOrDefault(id => !string.IsNullOrWhiteSpace(id) && installedIds.Contains(id));
-            if (duplicate is not null) throw new IOException("A Mod with this ID is already installed: " + duplicate);
-
             CopyDirectorySafely(stage, commitStage, token);
             var preferredName = Path.GetFileNameWithoutExtension(sourcePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
             if (Directory.Exists(sourcePath)) preferredName = Path.GetFileName(sourcePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
             var safeName = SanitizeFolderName(First(preferredName, found[0].Name, "Mod"));
-            var destination = Path.Combine(modsRoot, safeName);
-            for (var suffix = 2; Directory.Exists(destination) || File.Exists(destination); suffix++)
-                destination = Path.Combine(modsRoot, safeName + " " + suffix);
+            var destination = AvailableFolder(modsRoot, safeName);
             Directory.Move(commitStage, destination);
             var imported = ScanTree(destination).Count(mod => mod.IsEnabled);
             return $"{Path.GetFileName(destination)} ({imported})";
@@ -139,6 +130,16 @@ internal static class ModService
             if (Directory.Exists(commitStage)) Directory.Delete(commitStage, true);
             if (Directory.Exists(temporary)) Directory.Delete(temporary, true);
         }
+    }
+
+    // The manifest ID belongs to authored content, not to an installation.
+    // A separate directory gives copies independent runtime state and ownership.
+    internal static string AvailableFolder(string root, string name)
+    {
+        var destination = Path.Combine(root, name);
+        for (var suffix = 2; Directory.Exists(destination) || File.Exists(destination); suffix++)
+            destination = Path.Combine(root, name + " " + suffix);
+        return destination;
     }
 
     internal static List<ModEntry> ScanTree(string root)
@@ -158,9 +159,9 @@ internal static class ModService
     {
         var entries = ScanTree(mod);
         if (entries.Count != 1)
-            throw new IOException("Select one Mod folder with one mod.ini before rebuilding its runtime cache.");
+            throw new IOException("Select one Mod folder with one mod.ini before validating its declarations.");
         if (entries[0].Format == "2")
-            throw new IOException("This is a Format 2 Mod. Migrate it to Format 3 from the Repair page before rebuilding its runtime cache.");
+            throw new IOException("This is a Format 2 Mod. Migrate it to Format 3 from the Repair page before validating current declarations.");
         if (entries[0].Format != "3")
             throw new IOException("Only Format 3 Mods can be repaired for the current runtime.");
     }

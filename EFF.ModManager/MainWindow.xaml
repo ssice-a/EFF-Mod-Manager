@@ -198,12 +198,13 @@
           </DockPanel>
           <Border Grid.Row="1" Background="White" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="5" Padding="14,11" Margin="0,0,0,12">
             <Grid>
-              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <StackPanel>
                 <TextBlock Text="{Binding [repair.resource], Source={x:Static local:LanguageService.Instance}}" FontSize="11" Foreground="{StaticResource Muted}" />
                 <TextBox x:Name="ResourceRootBox" Height="34" Margin="0,5,0,0" LostFocus="ResourceRoot_LostFocus" />
               </StackPanel>
               <Button Grid.Column="1" VerticalAlignment="Bottom" Margin="9,0,0,0" Click="BrowseResources_Click" Content="{Binding [repair.browse], Source={x:Static local:LanguageService.Instance}}" />
+              <Button Grid.Column="2" VerticalAlignment="Bottom" Margin="9,0,0,0" Click="ImportLocalIndex_Click" Content="{Binding [repair.importIndex], Source={x:Static local:LanguageService.Instance}}" />
             </Grid>
           </Border>
           <DataGrid x:Name="RepairModsList" Grid.Row="2" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="False" SelectionMode="Single" SelectionUnit="FullRow" PreviewMouseMove="RepairModsList_PreviewMouseMove" PreviewMouseLeftButtonUp="RepairModsList_PreviewMouseLeftButtonUp" LostMouseCapture="RepairModsList_LostMouseCapture" Margin="0,0,0,12">

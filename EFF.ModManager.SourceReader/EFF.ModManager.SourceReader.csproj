@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>EFF.ModManager.SourceReader</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AnimeStudioSourceRoot Condition="'$(AnimeStudioSourceRoot)' == ''">$(MSBuildProjectDirectory)\..\..\tools\AnimeStudio</AnimeStudioSourceRoot>
+  </PropertyGroup>
+  <!-- Ship the game-format reader with Manager. No AnimeStudio installation,
+       GUI/graphics assembly or external executable is used at runtime. -->
+  <ItemGroup>
+    <Compile Include="$(AnimeStudioSourceRoot)\AnimeStudio\**\*.cs" Exclude="$(AnimeStudioSourceRoot)\AnimeStudio\bin\**;$(AnimeStudioSourceRoot)\AnimeStudio\obj\**" />
+    <Content Include="$(AnimeStudioSourceRoot)\AnimeStudio\CNKeys.json" Link="CNKeys.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(AnimeStudioSourceRoot)\AnimeStudio.Libraries\AnimeStudio.Ooz.dll" Link="AnimeStudio.Ooz.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(AnimeStudioSourceRoot)\LICENSE" Link="licenses\AnimeStudio.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <PackageReference Include="K4os.Hash.xxHash" Version="1.0.8" />
+    <PackageReference Include="Kyaru.Texture2DDecoder" Version="0.17.1" />
+    <PackageReference Include="Kyaru.Texture2DDecoder.Windows" Version="0.2.0" />
+    <PackageReference Include="MessagePack" Version="3.1.10" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+    <PackageReference Include="SkiaSharp" Version="3.119.4" />
+  </ItemGroup>
+</Project>

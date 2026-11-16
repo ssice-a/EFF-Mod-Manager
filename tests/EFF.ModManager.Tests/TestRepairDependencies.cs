@@ -16,6 +16,9 @@ internal sealed class EndfieldVfsArchive
 
 internal static class EndfieldVfsAssetIndexBuilder
 {
+    internal static Task<string> BuildAsync(EndfieldVfsArchive archive, string workspace, AnimeStudio.Game game,
+        IProgress<EndfieldIndexProgress> progress, CancellationToken token) =>
+        throw new IOException("This utility fixture has no VFS payload; the real integration suite covers local builds.");
     internal static bool TryGetOrRebindCurrentIndex(EndfieldVfsArchive archive, string workspace, out string indexPath,
         CancellationToken token = default)
     {
@@ -30,6 +33,8 @@ internal static class EndfieldVfsAssetIndexBuilder
         return File.Exists(indexPath);
     }
 }
+
+internal sealed record EndfieldIndexProgress(int ProcessedBundles, int TotalBundles, long AssetCount, string CurrentPath);
 
 internal static class EndfieldSharedIndexes
 {

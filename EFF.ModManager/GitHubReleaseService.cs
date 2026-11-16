@@ -25,13 +25,51 @@ internal static partial class GitHubReleaseService
     internal static Task<GitHubRelease?> GetLatestEffAsync(CancellationToken token) => GetLatestAsync(EffRepository, token);
     internal static Task<GitHubRelease?> GetLatestManagerAsync(CancellationToken token) => GetLatestAsync(ManagerRepository, token);
 
-    private static async Task<GitHubRelease?> GetLatestAsync(string repository, CancellationToken token)
+    private static Task<GitHubRelease?> GetLatestAsync(string repository, CancellationToken token) =>
+        GetLatestAsync(Client, repository, token);
+
+    internal static async Task<GitHubRelease?> GetLatestAsync(HttpClient client, string repository,
+        CancellationToken token, Func<TimeSpan, CancellationToken, Task>? delay = null)
     {
-        using var response = await Client.GetAsync($"https://api.github.com/repos/{repository}/releases/latest", token);
-        if (response.StatusCode == HttpStatusCode.NotFound) return null;
-        response.EnsureSuccessStatusCode();
-        await using var stream = await response.Content.ReadAsStreamAsync(token);
-        return await JsonSerializer.DeserializeAsync<GitHubRelease>(stream, JsonOptions, token);
+        delay ??= Task.Delay;
+        for (var attempt = 0; ; attempt++)
+        {
+            HttpResponseMessage response;
+            try { response = await client.GetAsync($"https://api.github.com/repos/{repository}/releases/latest", token); }
+            catch (Exception error) when (attempt < 2 && !token.IsCancellationRequested &&
+                error is HttpRequestException or TaskCanceledException)
+            {
+                await delay(TimeSpan.FromMilliseconds(400 * (attempt + 1)), token);
+                continue;
+            }
+            using (response)
+            {
+                if (response.StatusCode == HttpStatusCode.NotFound) return null;
+                if (!response.IsSuccessStatusCode)
+                {
+                    var limited = response.StatusCode == HttpStatusCode.TooManyRequests ||
+                        (response.StatusCode == HttpStatusCode.Forbidden &&
+                         ((response.Headers.TryGetValues("X-RateLimit-Remaining", out var remaining) && remaining.Contains("0")) ||
+                          response.Headers.RetryAfter is not null));
+                    var retry = response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500;
+                    var wait = response.Headers.RetryAfter?.Delta ??
+                        (response.Headers.RetryAfter?.Date is DateTimeOffset date ? date - DateTimeOffset.UtcNow :
+                            TimeSpan.FromMilliseconds(400 * (attempt + 1)));
+                    // Long rate-limit windows are reported to the user, not retried within the UI deadline.
+                    if (retry && attempt < 2 && wait <= TimeSpan.FromSeconds(2))
+                    {
+                        response.Dispose();
+                        await delay(wait < TimeSpan.Zero ? TimeSpan.Zero : wait, token);
+                        continue;
+                    }
+                    var reason = limited ? "GitHub API rate limit reached; retry later. The release website may still be reachable." :
+                        $"GitHub release lookup failed (HTTP {(int)response.StatusCode}).";
+                    throw new HttpRequestException(repository + ": " + reason, null, response.StatusCode);
+                }
+                await using var stream = await response.Content.ReadAsStreamAsync(token);
+                return await JsonSerializer.DeserializeAsync<GitHubRelease>(stream, JsonOptions, token);
+            }
+        }
     }
 
     internal static async Task<GitHubAsset?> GetLatestDllAssetAsync(CancellationToken token)

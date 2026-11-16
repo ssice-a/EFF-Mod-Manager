@@ -10,7 +10,9 @@ This project uses the following third-party components:
 
 EFF's Endfield VFS browser and extraction integration is based on a pinned
 AnimeStudio fork. The corresponding upstream `LICENSE` file is included in
-the extractor package.
+the extractor package. Manager also ships the pinned core as a bundled source
+reader for offline VFS/Bundle indexing. Its license is included as
+`licenses/AnimeStudio.txt`; linked core dependencies retain their own licenses.
 
 ## MinHook
 

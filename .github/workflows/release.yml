@@ -1,38 +1,16 @@
-name: Build and release
+name: Release policy (local artifacts only)
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing version tag to build and release manually
-        required: true
-        type: string
-
-env:
-  RELEASE_TAG: ${{ inputs.tag }}
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 9.0.x
-      - name: Publish Windows app
-        shell: pwsh
+      - name: Require locally deployed release artifacts
         run: |
-          $version = $env:RELEASE_TAG.Substring(1)
-          if (Test-Path publish) { Remove-Item publish -Recurse -Force }
-          dotnet publish EFF.ModManager/EFF.ModManager.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:Version=$version -o publish
-          Compress-Archive -Path publish/* -DestinationPath "EFF-Mod-Manager-v$version-win-x64.zip"
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: pwsh
-        run: gh release create $env:RELEASE_TAG "EFF-Mod-Manager-v$($env:RELEASE_TAG.TrimStart('v'))-win-x64.zip" --draft --notes-file RELEASE_NOTES.md
+          echo "::error::Cloud rebuilds are disabled. Build, test and deploy Manager with tools/release/build_deploy_local.ps1 -Component Manager in the EFF main checkout, then use its local release packaging workflow to upload those verified artifacts. See docs/release-management.md."
+          exit 1

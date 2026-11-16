@@ -6,15 +6,24 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <Version>0.2.3</Version>
-    <DefineConstants>$(DefineConstants);EFF_SOURCE_READER</DefineConstants>
     <AssemblyName>EFF.ModManager</AssemblyName>
     <RootNamespace>EffModManager</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="EFF.ModManager.IntegrationTests" />
     <Resource Include="app.ico" />
     <Content Include="..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\THIRD_PARTY_NOTICES" Link="THIRD_PARTY_NOTICES" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <PropertyGroup>
+    <Format3ValidatorPath Condition="'$(Format3ValidatorPath)' == ''">$(MSBuildProjectDirectory)\..\..\bin\author-assets\eff_author_assets_format3.dll</Format3ValidatorPath>
+    <AnimeStudioSourceRoot Condition="'$(AnimeStudioSourceRoot)' == ''">$(MSBuildProjectDirectory)\..\..\tools\AnimeStudio</AnimeStudioSourceRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="$(Format3ValidatorPath)" Link="native\eff_author_assets_format3.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <ProjectReference Include="..\EFF.ModManager.SourceReader\EFF.ModManager.SourceReader.csproj" />
+    <Compile Include="$(AnimeStudioSourceRoot)\AnimeStudio.GUI\EndfieldVfsAssetIndexBuilder.cs" Link="RepairCore\EndfieldVfsAssetIndexBuilder.cs" />
   </ItemGroup>
 </Project>

@@ -2,6 +2,7 @@
 **/obj/
 .vs/
 publish/
+/publish-local/
 *.user
 *.suo
 /publish-workspace-root/

@@ -36,45 +36,12 @@ internal static class LegacyMigrationService
             result.Add(new LegacyModSource(Path.GetFileName(directory), mod.Id, mod.Name));
         }
 
-        var duplicate = result.GroupBy(mod => mod.Id, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
-        if (duplicate is not null) throw new InvalidDataException("The backup contains duplicate Mod IDs: " + duplicate.Key);
         return result;
     }
 
-    internal static async Task<string> ResolveWorkspaceAsync(string game, string selected, string resourceRoot,
-        IProgress<string>? progress, CancellationToken token, HttpClient? indexClient = null)
-    {
-        var archive = await Task.Run(() => EndfieldVfsArchive.Open(game), token);
-        var gamePath = EndfieldSharedIndexes.Game(archive);
-        var defaultWorkspace = EndfieldSharedIndexes.DefaultWorkspace(gamePath, resourceRoot);
-        var currentWorkspace = EndfieldSharedIndexes.FindCurrent(archive, token, selected, defaultWorkspace);
-        if (!string.IsNullOrWhiteSpace(currentWorkspace)) return currentWorkspace;
-
-        if (string.IsNullOrWhiteSpace(resourceRoot))
-            throw new IOException("Choose a shared resource folder in Settings to download and store the public game index.");
-
-        var content = EndfieldPortableIndex.ContentIdentity(archive);
-        progress?.Report("Finding a public index that matches this game's Bundle contents...");
-        var published = await EndfieldIndexUpdates.Find(EndfieldIndexUpdates.DefaultSource, content, token, indexClient!);
-        if (published is null || !string.Equals(published.Release.GameContent, content, StringComparison.OrdinalIgnoreCase))
-            throw new IOException("No public index matches this game's exact Bundle contents. No Mods were migrated.");
-
-        Directory.CreateDirectory(defaultWorkspace);
-        var package = EndfieldIndexUpdates.CachedPackage(published, resourceRoot);
-        progress?.Report("Downloading and verifying the matching public game index...");
-        await EndfieldIndexUpdates.Download(published, package, progress ?? new Progress<string>(_ => { }), token, indexClient!);
-        token.ThrowIfCancellationRequested();
-        archive.VerifyCurrent();
-        progress?.Report("Importing the public index and validating it against local game Bundles...");
-        var indexPath = EndfieldPortableIndex.Import(archive, defaultWorkspace, package, content, token);
-        if (!EndfieldVfsAssetIndexBuilder.TryGetOrRebindCurrentIndex(archive, defaultWorkspace, out var currentIndex, token) ||
-            !File.Exists(currentIndex + ".bundles") ||
-            !string.Equals(Path.GetFullPath(indexPath), Path.GetFullPath(currentIndex), StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("The downloaded public index did not produce a complete local index workspace.");
-        EndfieldSharedIndexes.TryRemember(archive, defaultWorkspace, token);
-        return defaultWorkspace;
-    }
-
+    internal static Task<string> ResolveWorkspaceAsync(string game, string selected, string resourceRoot,
+        IProgress<string>? progress, CancellationToken token, HttpClient? indexClient = null) =>
+        IndexAcquisition.ResolveAsync(game, selected, resourceRoot, progress, token, indexClient);
     internal static async Task<LegacyMigrationSummary> MigrateAsync(string game, string resourceRoot, string workspace,
         IProgress<string>? progress, CancellationToken token)
     {
@@ -87,7 +54,6 @@ internal static class LegacyMigrationService
         if (sources.Count == 0) throw new DirectoryNotFoundException("No Format 2 Mods were found in plugin\\backup.");
         var modsRoot = ModService.ModsRoot(game);
         Directory.CreateDirectory(modsRoot);
-        ValidateNoConflicts(modsRoot, sources);
 
         var transactionRoot = Path.Combine(modsRoot, ".effmm-migration-" + Guid.NewGuid().ToString("N"));
         var keepStaging = false;
@@ -114,10 +80,9 @@ internal static class LegacyMigrationService
         var selected = mods.Where(mod => mod.Format == "2").ToArray();
         if (selected.Length == 0) return new LegacyMigrationSummary(0, 0, []);
 
-        var duplicate = selected.GroupBy(mod => mod.Id, StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault(group => string.IsNullOrWhiteSpace(group.Key) || group.Count() > 1);
-        if (duplicate is not null)
-            throw new InvalidDataException("Selected Format 2 Mods need unique, nonempty IDs: " + duplicate.Key);
+        if (selected.Any(mod => string.IsNullOrWhiteSpace(mod.Id)))
+            throw new InvalidDataException("Selected Format 2 Mods need nonempty author IDs.");
+        selected = selected.DistinctBy(mod => Path.GetFullPath(mod.Folder), StringComparer.OrdinalIgnoreCase).ToArray();
 
         var modsRoot = ModService.ModsRoot(game);
         var transactionRoot = Path.Combine(modsRoot, ".effmm-repair-migration-" + Guid.NewGuid().ToString("N"));
@@ -338,7 +303,6 @@ internal static class LegacyMigrationService
         Action? preserveStagingOnRollbackFailure = null)
     {
         ValidateOutputs(stagingRoot, sources);
-        ValidateNoConflicts(modsRoot, sources);
 
         var published = new List<(string Staged, string Destination)>();
         try
@@ -346,7 +310,7 @@ internal static class LegacyMigrationService
             foreach (var source in sources)
             {
                 var staged = Path.Combine(stagingRoot, source.FolderName);
-                var destination = Path.Combine(modsRoot, source.FolderName);
+                var destination = ModService.AvailableFolder(modsRoot, source.FolderName);
                 Directory.Move(staged, destination);
                 published.Add((staged, destination));
             }
@@ -430,19 +394,6 @@ internal static class LegacyMigrationService
                     new AggregateException(new[] { publishError }.Concat(rollbackErrors)));
             }
             throw new IOException("Format 3 replacement failed. Original Mods were restored.", publishError);
-        }
-    }
-
-    private static void ValidateNoConflicts(string modsRoot, IReadOnlyList<LegacyModSource> sources)
-    {
-        var ids = sources.Select(source => source.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var duplicate = ModService.ScanTree(modsRoot).FirstOrDefault(mod => !string.IsNullOrWhiteSpace(mod.Id) && ids.Contains(mod.Id));
-        if (duplicate is not null) throw new IOException("A Mod with this ID is already installed: " + duplicate.Id);
-        foreach (var source in sources)
-        {
-            var destination = Path.Combine(modsRoot, source.FolderName);
-            if (Directory.Exists(destination) || File.Exists(destination))
-                throw new IOException("A destination Mod folder already exists: " + source.FolderName);
         }
     }
 
