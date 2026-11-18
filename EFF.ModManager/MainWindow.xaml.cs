@@ -24,10 +24,12 @@ public partial class MainWindow : Window
     private int _repairSelectionSweepLastIndex = -1;
     private Version? _latestDll;
 
-    public MainWindow()
+    public MainWindow() : this(SettingsStore.Load()) { }
+
+    internal MainWindow(AppSettings settings, bool startBackgroundTasks = true)
     {
         InitializeComponent();
-        _settings = SettingsStore.Load();
+        _settings = settings;
         var legacyRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EFF", "Resources");
         var sharedRoot = SharedResources.ResourceRoot;
         if (!string.IsNullOrWhiteSpace(sharedRoot))
@@ -39,14 +41,18 @@ public partial class MainWindow : Window
         LanguageService.Instance.IsEnglish = _settings.English;
         ChineseRadio.IsChecked = !_settings.English;
         EnglishRadio.IsChecked = _settings.English;
+        InitializeLogs();
         GamePathBox.Text = _settings.GamePath;
         ResourceRootBox.Text = _settings.ResourceRoot;
         SettingsResourceRootBox.Text = _settings.ResourceRoot;
         RefreshSharedToolsStatus();
         ManagerVersionText.Text = "v" + ManagerUpdateService.CurrentVersion.ToString(3);
         _initializing = false;
-        Loaded += MainWindow_Loaded;
-        Activated += MainWindow_Activated;
+        if (startBackgroundTasks)
+        {
+            Loaded += MainWindow_Loaded;
+            Activated += MainWindow_Activated;
+        }
         Closing += (_, _) => _shutdown.Cancel();
         RefreshMods();
         RefreshDllState();
@@ -67,7 +73,7 @@ public partial class MainWindow : Window
             RefreshDllState();
         }
         catch (OperationCanceledException) { return; }
-        catch (Exception error) { SetStatus(error.Message); }
+        catch (Exception error) { ReportError(error); }
 
         _ = CheckUpdatesAsync(automatic: true);
     }
@@ -90,6 +96,8 @@ public partial class MainWindow : Window
         if (!SettingsResourceRootBox.IsKeyboardFocusWithin)
             SettingsResourceRootBox.Text = sharedRoot;
         SettingsStore.Save(_settings);
+        ConfigureLogLocation();
+        RefreshLogLocation();
     }
 
     private string T(string key) => LanguageService.Instance[key];
@@ -100,6 +108,12 @@ public partial class MainWindow : Window
     {
         FooterStatus.Text = value;
         HeaderStatus.Text = value;
+    }
+
+    private void ReportError(Exception error, string operation = "log.action", RecoveryAdvice? advice = null)
+    {
+        ActivityLog.Default.Failure(operation, error, advice);
+        SetStatus(error.Message + " " + T("log.seeLogs"));
     }
 
     private void SetGamePath(string path)
@@ -114,18 +128,18 @@ public partial class MainWindow : Window
         RefreshMods();
     }
 
-    private async Task ExecuteAsync(Func<Task> action, bool showError = true)
+    private async Task ExecuteAsync(Func<Task> action, bool showError = true, string operation = "log.action", RecoveryAdvice? advice = null)
     {
         if (_busy) return;
         _busy = true;
         MainTabs.IsEnabled = false;
         Mouse.OverrideCursor = Cursors.Wait;
-        try { await action(); }
-        catch (OperationCanceledException) { SetStatus(T("footer.ready")); }
+        try { await action(); ActivityLog.Default.Info("log.action", FooterStatus.Text); }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
         catch (Exception error)
         {
-            SetStatus(error.Message);
-            if (MainTabs.SelectedIndex == 3) RepairStatusText.Text = error.Message;
+            ReportError(error, operation, advice);
+            if (RepairModsList.IsVisible) RepairStatusText.Text = error.Message + " " + T("log.seeLogs");
             if (showError) MessageBox.Show(this, error.Message, T("dialog.title"), MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally
@@ -164,6 +178,8 @@ public partial class MainWindow : Window
         try
         {
             SharedResources.SetResourceRoot(text);
+            ConfigureLogLocation();
+            RefreshLogLocation();
             _settings.ResourceRoot = Path.GetFullPath(text);
             ResourceRootBox.Text = _settings.ResourceRoot;
             SettingsResourceRootBox.Text = _settings.ResourceRoot;
@@ -171,7 +187,7 @@ public partial class MainWindow : Window
             RefreshSharedToolsStatus();
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
-        { SetStatus(error.Message); }
+        { ReportError(error); }
     }
 
     private void SettingsResourceRoot_TextChanged(object sender, TextChangedEventArgs e)
@@ -219,17 +235,18 @@ public partial class MainWindow : Window
             var migrator = await LegacyMigrationTools.GetMigratorAsync(_settings.ResourceRoot, _shutdown.Token);
             SharedToolsStatus.Text = string.Format(T("settings.toolsReady"), migrator);
             SetStatus(T("settings.toolsPrepared"));
+            ActivityLog.Default.Info("log.tools", SharedToolsStatus.Text);
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
         catch (Exception error)
         {
             SharedToolsStatus.Text = error.Message;
-            SetStatus(error.Message);
+            ReportError(error, "log.tools", RecoveryHelp.Tools(_settings.ResourceRoot));
         }
         finally
         {
             PrepareSharedToolsButton.IsEnabled = true;
-            RefreshSharedToolsStatus();
+            if (SharedToolsStatus.Text == T("settings.preparingTools")) RefreshSharedToolsStatus();
         }
     }
 
@@ -301,7 +318,8 @@ public partial class MainWindow : Window
             DllVersionText.Text += "   ·   " + T("status.updateAvailable");
     }
 
-    private async void InstallDll_Click(object sender, RoutedEventArgs e) => await ExecuteAsync(InstallLatestDllAsync);
+    private async void InstallDll_Click(object sender, RoutedEventArgs e) => await ExecuteAsync(InstallLatestDllAsync,
+        operation: "log.dllUpdate", advice: RecoveryHelp.Release("ssice-a/EFF", HasGame ? GamePath : ""));
 
     private Task InstallLatestDllAsync() => InstallLatestDllAsync(ignoreDeclinedUnmanaged: false);
 
@@ -368,11 +386,20 @@ public partial class MainWindow : Window
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
-                // A diagnostic write must not discard a successful update lookup.
+                ActivityLog.Default.Failure("log.update", error, warning: true);
             }
             var failures = new List<string>();
-            if (!checks.Dll.Succeeded) failures.Add("EFF DLL: " + checks.Dll.Error!.Message);
-            if (!checks.Manager.Succeeded) failures.Add("Mod Manager: " + checks.Manager.Error!.Message);
+            if (!checks.Dll.Succeeded)
+            {
+                failures.Add("EFF DLL: " + checks.Dll.Error!.Message);
+                ActivityLog.Default.Failure("log.dllUpdate", checks.Dll.Error!, RecoveryHelp.Release("ssice-a/EFF", HasGame ? GamePath : ""));
+            }
+            if (!checks.Manager.Succeeded)
+            {
+                failures.Add("Mod Manager: " + checks.Manager.Error!.Message);
+                ActivityLog.Default.Failure("log.managerUpdate", checks.Manager.Error!, RecoveryHelp.Release("ssice-a/EFF-Mod-Manager", AppContext.BaseDirectory));
+            }
+            if (failures.Count == 0) ActivityLog.Default.Info("log.update", T("status.updatesChecked"));
             _latestDll = result.Dll;
             RefreshDllState();
             if (!checks.Manager.Succeeded)
@@ -451,7 +478,7 @@ public partial class MainWindow : Window
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
         catch (Exception error)
         {
-            SetStatus(T("status.updateCheckFailed"));
+            ReportError(error, "log.update");
             ManagerVersionText.Text = error.Message;
         }
         finally { _updateCheckGate.Release(); }
@@ -518,7 +545,7 @@ public partial class MainWindow : Window
         }
         catch (Exception error)
         {
-            SetStatus(error.Message);
+            ReportError(error);
             MessageBox.Show(this, error.Message, T("dialog.title"), MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
@@ -551,19 +578,18 @@ public partial class MainWindow : Window
         if (sender is not TextBox editor || editor.DataContext is not ModEntry mod || !HasGame) return;
         if (_cancelModNameEdits.Remove(mod)) return;
         var editedName = editor.Text.Trim();
-        if (string.Equals(editedName, mod.Name, StringComparison.Ordinal) &&
-            string.Equals(Path.GetFileName(mod.Folder), editedName, StringComparison.Ordinal)) return;
+        if (string.Equals(editedName, mod.Name, StringComparison.Ordinal)) return;
 
         try
         {
-            ModService.Rename(ModService.ModsRoot(GamePath), mod, editedName, _allMods);
+            ModService.RenameDisplayName(mod, editedName);
             if (ModsList.SelectedItem is ModEntry selected && ReferenceEquals(selected, mod)) ShowDetails(mod);
             SetStatus(T("mods.nameSaved") + ": " + mod.Name);
         }
         catch (Exception error)
         {
             editor.Text = mod.Name;
-            SetStatus(error.Message);
+            ReportError(error);
             MessageBox.Show(this, error.Message, T("dialog.title"), MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
@@ -592,6 +618,8 @@ public partial class MainWindow : Window
         DetailsDescription.Text = string.IsNullOrWhiteSpace(mod.Description) ? T("mods.unknown") : mod.Description;
         DetailsKeys.ItemsSource = mod.Hotkeys;
         DetailsPath.Text = mod.Folder;
+        _ = ShowWeaponDetailsAsync(mod);
+        _ = ShowCharacterDetailsAsync(mod);
     }
 
     private void ClearDetails()
@@ -601,6 +629,8 @@ public partial class MainWindow : Window
         DetailsDescription.Text = "";
         DetailsKeys.ItemsSource = null;
         DetailsPath.Text = "";
+        ClearWeaponDetails();
+        ClearCharacterDetails();
     }
 
     private async void ModEnabled_Click(object sender, RoutedEventArgs e)
@@ -613,6 +643,17 @@ public partial class MainWindow : Window
             RefreshMods(mod.Folder);
             SetStatus(T("status.modToggled") + ": " + mod.Name);
             return Task.CompletedTask;
+        });
+    }
+
+    private async void CopyMod_Click(object sender, RoutedEventArgs e)
+    {
+        if (_weaponApplyBusy || ModsList.SelectedItem is not ModEntry mod || !EnsureGame()) return;
+        await ExecuteAsync(async () =>
+        {
+            var copy = await ModService.DuplicateAsync(mod, GamePath, _shutdown.Token);
+            RefreshMods(copy.Folder);
+            SetStatus(T("mods.copied"));
         });
     }
 
@@ -630,6 +671,7 @@ public partial class MainWindow : Window
         try { sources = LegacyMigrationService.InspectBackup(LegacyMigrationService.BackupRoot(GamePath)); }
         catch (Exception error)
         {
+            ReportError(error);
             MessageBox.Show(this, error.Message, T("dialog.title"), MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
@@ -730,6 +772,8 @@ public partial class MainWindow : Window
         }
         _settings.ResourceRoot = dialog.FolderName;
         SharedResources.SetResourceRoot(dialog.FolderName);
+        ConfigureLogLocation();
+        RefreshLogLocation();
         ResourceRootBox.Text = dialog.FolderName;
         SettingsResourceRootBox.Text = dialog.FolderName;
         SettingsStore.Save(_settings);

@@ -22,6 +22,7 @@ try
         await VerifyManagerUpdateApplyTransaction(fixture);
         return;
     }
+    await ActivityLogTests.RunAsync(fixture);
     VerifyEmptyResourceRootStartupSetting();
     VerifyManagerUpdateCacheLocation();
     await UpdateCheckTests.RunAsync();

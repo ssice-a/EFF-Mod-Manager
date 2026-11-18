@@ -46,7 +46,8 @@ internal static class ManagerUpdateService
         else
         {
             if (File.Exists(package)) File.Delete(package);
-            await GitHubReleaseService.DownloadVerifiedAsync(asset, package, progress, token);
+            try { await GitHubReleaseService.DownloadVerifiedAsync(asset, package, progress, token); }
+            catch (Exception error) { throw ActivityLog.WithRecovery(error, RecoveryHelp.Release("ssice-a/EFF-Mod-Manager", installRoot, asset.browser_download_url)); }
         }
 
         var stage = Path.Combine(cacheRoot, "staging-" + Guid.NewGuid().ToString("N"));

@@ -34,13 +34,21 @@ internal static class Format3Validation
             throw new InvalidDataException("mod.ini exceeds the 16 MiB validation limit.");
         token.ThrowIfCancellationRequested();
         var ini = File.ReadAllBytes(entry.IniPath);
+        var report = ValidateBytes(entry.Folder, ini, token);
+        return Path.GetFileName(entry.Folder) + "：INI 装配、控制表达式和声明文件路径校验通过。资源内容与当前游戏逻辑命中在请求时按需校验；无需离线重编译，未更改文件。 " + report;
+    }
+
+    internal static string ValidateBytes(string root, byte[] ini, CancellationToken token)
+    {
+        if (ini.Length > 16 * 1024 * 1024) throw new InvalidDataException("mod.ini exceeds the 16 MiB validation limit.");
+        token.ThrowIfCancellationRequested();
         var response = new byte[1024 * 1024];
-        var status = Validator.Value(entry.Folder, ini, (nuint)ini.Length, response, (nuint)response.Length);
+        var status = Validator.Value(root, ini, (nuint)ini.Length, response, (nuint)response.Length);
         token.ThrowIfCancellationRequested();
         var length = Array.IndexOf(response, (byte)0);
         var report = Encoding.UTF8.GetString(response, 0, length < 0 ? response.Length : length);
         if (status != 0)
             throw new InvalidDataException(report + "；请根据错误修正 INI 声明，或恢复缺失的作者资源后重试。此检查不会重建作者资源，原 Mod 未更改。");
-        return Path.GetFileName(entry.Folder) + "：INI 装配、控制表达式和声明文件路径校验通过。资源内容与当前游戏逻辑命中在请求时按需校验；无需离线重编译，未更改文件。 " + report;
+        return report;
     }
 }

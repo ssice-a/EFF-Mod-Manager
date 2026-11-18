@@ -19,6 +19,7 @@ internal static class IntegratedRepairService
             }
             catch (Exception error) when (error is not OperationCanceledException)
             {
+                ActivityLog.Default.Failure("log.repair", new IOException(mod + ": " + error.Message, error));
                 failed++;
                 progress?.Report(Path.GetFileName(mod) + "：" + error.Message);
             }

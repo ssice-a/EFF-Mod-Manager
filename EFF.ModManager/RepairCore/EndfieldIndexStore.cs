@@ -257,6 +257,38 @@ namespace AnimeStudio.GUI
         private static FileStream OpenIndex(string path) => new(path, FileMode.Open, FileAccess.Read, FileShare.Read,
             4 * 1024 * 1024, FileOptions.SequentialScan);
 
+        // Read an exact, validated Bundle range using the existing incremental
+        // sidecar. Browsing a borrowed weapon Mesh must not rescan the index.
+        internal static IReadOnlyList<VirtualAssetRecord> ReadBundleAssets(string path, EndfieldBundleIndexSpan span,
+            System.Threading.CancellationToken token)
+        {
+            using var stream = OpenIndex(path);
+            if (span.Offset < 0 || span.Size < 0 || span.Offset > stream.Length - span.Size)
+                throw new InvalidDataException("Invalid Bundle index range.");
+            var digest = EndfieldBundleIndexCache.HashRange(stream, span.Offset, span.Size, new byte[65536], token);
+            if (!digest.SequenceEqual(span.Sha256)) throw new InvalidDataException("Bundle index records changed or are corrupt: " + span.Path);
+            stream.Position = span.Offset;
+            using var reader = new BinaryReader(stream, Encoding.UTF8, true);
+            var records = new List<VirtualAssetRecord>(); long cabs = 0;
+            while (stream.Position < span.Offset + span.Size)
+            {
+                token.ThrowIfCancellationRequested();
+                var kind = reader.ReadByte();
+                if (kind == AssetRecord) records.Add(ReadAsset(reader));
+                else if (kind == CabRecord)
+                {
+                    cabs++; reader.ReadString(); reader.ReadString(); var count = reader.ReadInt32();
+                    if (count < 0 || count > span.Offset + span.Size - stream.Position) throw new InvalidDataException("Invalid Bundle CAB count.");
+                    for (var i = 0; i < count; i++) reader.ReadString();
+                }
+                else throw new InvalidDataException("Invalid Bundle index record.");
+            }
+            if (stream.Position != span.Offset + span.Size || records.Count != span.Assets || cabs != span.Cabs ||
+                records.Any(r => !r.Source.Equals(span.Path, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidDataException("Incomplete Bundle index range.");
+            return records;
+        }
+
         private static string ReadHeader(BinaryReader reader)
         {
             // EIEM v3 predates the EFF name; its record layout is identical.

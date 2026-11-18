@@ -71,7 +71,8 @@ internal static class DllInstallService
         try
         {
             progress?.Report("Downloading " + asset.name);
-            await GitHubReleaseService.DownloadVerifiedAsync(asset, archivePath, progress, token);
+            try { await GitHubReleaseService.DownloadVerifiedAsync(asset, archivePath, progress, token); }
+            catch (Exception error) { throw ActivityLog.WithRecovery(error, RecoveryHelp.Release("ssice-a/EFF", game, asset.browser_download_url)); }
             await ExtractPackageAsync(archivePath, extracted, token);
             var sourceFiles = Directory.EnumerateFiles(extracted, "*", SearchOption.AllDirectories)
                 .ToDictionary(path => ToRelative(extracted, path), path => path, StringComparer.OrdinalIgnoreCase);

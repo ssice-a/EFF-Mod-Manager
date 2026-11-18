@@ -4,7 +4,8 @@ namespace EffModManager;
 
 internal static class SettingsStore
 {
-    internal static string DataRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EFF-Mod-Manager");
+    internal static string DataRoot => Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA") ??
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EFF-Mod-Manager");
     internal static string SettingsPath => Path.Combine(DataRoot, "settings.json");
     internal static string DllStatePath(string game) => Path.Combine(DataRoot, "installations", GameKey(game), "dll-install.json");
     internal static string BackupRoot(string game) => Path.Combine(DataRoot, "installations", GameKey(game), "backups");

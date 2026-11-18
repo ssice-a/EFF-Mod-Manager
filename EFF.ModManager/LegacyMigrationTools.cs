@@ -50,16 +50,46 @@ internal static class LegacyMigrationTools
         await using var gate = await AcquireLockAsync(Path.Combine(tools, "install.lock"), token);
 
         var current = ReadInstalled(tools);
+        var downloads = Path.Combine(tools, "downloads");
+        var localManifest = Path.Combine(downloads, "eff-native-tools.json");
+        if (File.Exists(localManifest))
+        {
+            try
+            {
+                using var local = JsonDocument.Parse(await File.ReadAllTextAsync(localManifest, token));
+                var data = ValidateManifest(local.RootElement);
+                if (File.Exists(Path.Combine(downloads, data.ArchiveName)) &&
+                    (current is null || ReadCurrentHash(tools, current) != data.Sha256))
+                    return await DownloadAndInstallAsync(root, tools, data, token);
+            }
+            catch (Exception error) when (!token.IsCancellationRequested)
+            {
+                if (current is null) throw ActivityLog.WithRecovery(error, RecoveryHelp.Tools(root));
+                ActivityLog.Default.Failure("log.tools", error, RecoveryHelp.Tools(root), warning: true);
+            }
+        }
         JsonDocument manifest;
-        try { manifest = await ReadLatestManifestAsync(token); }
-        catch (Exception error) when (current is not null && error is (HttpRequestException or IOException or TaskCanceledException))
-        { return current; }
+        try
+        {
+            using var lookupTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            lookupTimeout.CancelAfter(TimeSpan.FromSeconds(30));
+            manifest = await ReadLatestManifestAsync(lookupTimeout.Token);
+        }
+        catch (Exception error) when (!token.IsCancellationRequested && error is (HttpRequestException or IOException or TaskCanceledException or JsonException))
+        {
+            ActivityLog.Default.Failure("log.tools", error, RecoveryHelp.Tools(root), warning: true);
+            if (current is not null) return current;
+            if (!File.Exists(localManifest)) throw ActivityLog.WithRecovery(error, RecoveryHelp.Tools(root));
+            manifest = JsonDocument.Parse(await File.ReadAllTextAsync(localManifest, token));
+        }
 
         using (manifest)
         {
             var data = ValidateManifest(manifest.RootElement);
             if (current is not null && ReadCurrentHash(tools, current) == data.Sha256)
                 return current;
+            Directory.CreateDirectory(downloads);
+            SettingsStore.WriteAtomic(localManifest, manifest.RootElement.GetRawText());
             return await DownloadAndInstallAsync(root, tools, data, token);
         }
     }
@@ -179,28 +209,41 @@ internal static class LegacyMigrationTools
         var staging = Path.Combine(tools, ".migration-install-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(staging);
         var archivePath = Path.Combine(staging, "native-tools.zip");
+        var cachedArchive = Path.Combine(tools, "downloads", manifest.ArchiveName);
         var payload = Path.Combine(staging, "payload");
         var destination = Path.Combine(tools, manifest.Sha256);
         try
         {
-            using var response = await Client.GetAsync(manifest.Url, HttpCompletionOption.ResponseHeadersRead, token);
-            response.EnsureSuccessStatusCode();
-            await using (var input = await response.Content.ReadAsStreamAsync(token))
-            await using (var output = new FileStream(archivePath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024, true))
-            using (var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+            if (File.Exists(cachedArchive))
             {
-                var buffer = new byte[1024 * 1024];
-                long total = 0;
-                int count;
-                while ((count = await input.ReadAsync(buffer, token)) > 0)
+                // A manually downloaded archive follows exactly the same extraction and receipt path.
+                File.Copy(cachedArchive, archivePath);
+                await using var local = File.OpenRead(archivePath);
+                if (local.Length != manifest.Bytes || !Convert.ToHexString(await SHA256.HashDataAsync(local, token)).Equals(manifest.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("The local shared-tools archive size or SHA-256 check failed: " + cachedArchive);
+            }
+            else
+            {
+                using var response = await Client.GetAsync(manifest.Url, HttpCompletionOption.ResponseHeadersRead, token);
+                response.EnsureSuccessStatusCode();
+                await using (var input = await response.Content.ReadAsStreamAsync(token))
+                await using (var output = new FileStream(archivePath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024, true))
+                using (var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
                 {
-                    total += count;
-                    if (total > manifest.Bytes) throw new IOException("The shared-tools archive exceeds its published size.");
-                    hash.AppendData(buffer, 0, count);
-                    await output.WriteAsync(buffer.AsMemory(0, count), token);
+                    var buffer = new byte[1024 * 1024];
+                    long total = 0;
+                    int count;
+                    while ((count = await input.ReadAsync(buffer, token)) > 0)
+                    {
+                        total += count;
+                        if (total > manifest.Bytes) throw new IOException("The shared-tools archive exceeds its published size.");
+                        hash.AppendData(buffer, 0, count);
+                        await output.WriteAsync(buffer.AsMemory(0, count), token);
+                    }
+                    if (total != manifest.Bytes || !Convert.ToHexString(hash.GetHashAndReset()).Equals(manifest.Sha256, StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("The shared-tools archive size or SHA-256 check failed.");
                 }
-                if (total != manifest.Bytes || !Convert.ToHexString(hash.GetHashAndReset()).Equals(manifest.Sha256, StringComparison.OrdinalIgnoreCase))
-                    throw new IOException("The shared-tools archive size or SHA-256 check failed.");
+                File.Copy(archivePath, cachedArchive, true);
             }
 
             Directory.CreateDirectory(payload);
@@ -227,6 +270,10 @@ internal static class LegacyMigrationTools
             }
             finally { if (File.Exists(currentTemp)) File.Delete(currentTemp); }
             return Path.Combine(destination, "nativepack", "eff_migrate_mods.exe");
+        }
+        catch (Exception error)
+        {
+            throw ActivityLog.WithRecovery(error, RecoveryHelp.Tools(root, manifest.Url));
         }
         finally
         {

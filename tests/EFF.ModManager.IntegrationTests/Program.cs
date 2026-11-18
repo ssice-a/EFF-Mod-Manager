@@ -11,9 +11,13 @@ Environment.SetEnvironmentVariable("EFF_RESOURCE_ROOT", Path.Combine(root, "reso
 Directory.CreateDirectory(root);
 try
 {
+    WeaponTests.Run(root);
+    CharacterTargetTests.Run(root);
+    CatalogCacheTests.Run(root);
     await VerifyFormat3UiRepairAsync(root);
     await VerifyOfflineIndexAsync(root);
     VerifySourceReaderDependencies();
+    ManagerUiTests.Run(root);
 }
 finally
 {
@@ -118,6 +122,13 @@ static async Task VerifyOfflineIndexAsync(string root)
     var loaded = EndfieldIndexStore.Load(index);
     Require(loaded.StoredAssetCount == 1 && loaded.Assets.Records.Any(item => item.Name == "OfflineFixture"),
         "Offline fallback did not parse the real UnityFS/SerializedFile fixture through the bundled reader.");
+    var span = EndfieldBundleIndexCache.TryLoad(index)!.Spans.Values.Single();
+    Require(EndfieldIndexStore.ReadBundleAssets(index, span, default).Single().Name == "OfflineFixture",
+        "Bounded Bundle lookup did not reuse the incremental index range.");
+    var corruptRangeRejected = false;
+    try { EndfieldIndexStore.ReadBundleAssets(index, span with { Sha256 = new byte[32] }, default); }
+    catch (InvalidDataException) { corruptRangeRejected = true; }
+    Require(corruptRangeRejected, "Corrupt Bundle index range was accepted.");
     Console.WriteLine("PASS: actual migration resolver builds and validates a fresh index from local game VFS when network is unavailable.");
 
     var package = Path.Combine(root, "manual.effindex.gz");

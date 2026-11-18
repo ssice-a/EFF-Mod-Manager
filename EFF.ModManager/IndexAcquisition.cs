@@ -12,6 +12,19 @@ internal static class IndexAcquisition
     internal static async Task<string> ResolveAsync(string game, string selected, string resourceRoot,
         IProgress<string>? progress, CancellationToken token, HttpClient? client = null)
     {
+        try { return await ResolveCoreAsync(game, selected, resourceRoot, progress, token, client); }
+        catch (Exception error)
+        {
+            if (error.Data[nameof(RecoveryAdvice)] is null)
+                ActivityLog.WithRecovery(error, RecoveryHelp.Index(resourceRoot,
+                    EndfieldSharedIndexes.DefaultWorkspace(game, resourceRoot)));
+            throw;
+        }
+    }
+
+    private static async Task<string> ResolveCoreAsync(string game, string selected, string resourceRoot,
+        IProgress<string>? progress, CancellationToken token, HttpClient? client)
+    {
         var archive = await Task.Run(() => EndfieldVfsArchive.Open(game), token);
         var defaultWorkspace = EndfieldSharedIndexes.DefaultWorkspace(EndfieldSharedIndexes.Game(archive), resourceRoot);
         var explicitPackage = !string.IsNullOrWhiteSpace(selected) && selected.EndsWith(".effindex.gz", StringComparison.OrdinalIgnoreCase);
@@ -40,7 +53,10 @@ internal static class IndexAcquisition
                 return Import(archive, workspace, package, content, token);
             }
             catch (Exception error) when (error is IOException or InvalidDataException or JsonException)
-            { progress?.Report("Local index is not compatible; retained the package: " + error.Message); }
+            {
+                ActivityLog.Default.Failure("log.index", error, RecoveryHelp.Index(resourceRoot, workspace), warning: true);
+                progress?.Report("Local index is not compatible; retained the package: " + error.Message);
+            }
         }
 
         try
@@ -50,14 +66,21 @@ internal static class IndexAcquisition
             if (published is not null && string.Equals(published.Release.GameContent, content, StringComparison.OrdinalIgnoreCase))
             {
                 var package = EndfieldIndexUpdates.CachedPackage(published, resourceRoot);
-                await EndfieldIndexUpdates.Download(published, package, progress!, token, client!);
+                try { await EndfieldIndexUpdates.Download(published, package, progress!, token, client!); }
+                catch (Exception error)
+                {
+                    throw ActivityLog.WithRecovery(error, RecoveryHelp.Index(resourceRoot, workspace, published.Url));
+                }
                 return Import(archive, workspace, package, content, token);
             }
             progress?.Report("No exact public index exists; building from the local game.");
         }
         catch (Exception error) when (!token.IsCancellationRequested &&
             error is HttpRequestException or IOException or TaskCanceledException or InvalidDataException or JsonException)
-        { progress?.Report("Public index unavailable; building from the local game: " + error.Message); }
+        {
+            ActivityLog.Default.Failure("log.index", error, RecoveryHelp.Index(resourceRoot, workspace), warning: true);
+            progress?.Report("Public index unavailable; building from the local game: " + error.Message);
+        }
         token.ThrowIfCancellationRequested();
         var buildProgress = new InlineIndexProgress(value => progress?.Report(
             $"Local index: {value.ProcessedBundles}/{value.TotalBundles} Bundles, {value.AssetCount} assets; {value.CurrentPath}"));

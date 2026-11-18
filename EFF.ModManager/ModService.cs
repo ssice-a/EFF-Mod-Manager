@@ -75,7 +75,7 @@ internal static class ModService
         };
     }
 
-    private static Dictionary<string, Dictionary<string, string>> ParseIni(IEnumerable<string> lines)
+    internal static Dictionary<string, Dictionary<string, string>> ParseIni(IEnumerable<string> lines)
     {
         var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         Dictionary<string, string>? current = null;
@@ -131,6 +131,27 @@ internal static class ModService
             if (Directory.Exists(temporary)) Directory.Delete(temporary, true);
         }
     }
+
+    internal static Task<ModEntry> DuplicateAsync(ModEntry source, string game, CancellationToken token) => Task.Run(() =>
+    {
+        var root = ModsRoot(game);
+        Directory.CreateDirectory(root);
+        var staging = Path.Combine(root, ".effmm-copy-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            // Reuse the import copier (including reparse-point checks and exclusion of caches/backups).
+            CopyDirectorySafely(source.Folder, staging, token);
+            var copy = Read(staging, Path.Combine(staging, Path.GetFileName(source.IniPath)));
+            RenameDisplayName(copy, source.Name[..Math.Min(source.Name.Length, 65)] + " (" + LanguageService.Instance["mods.copySuffix"] + ")");
+            token.ThrowIfCancellationRequested();
+            var destination = AvailableFolder(root, Path.GetFileName(source.Folder));
+            Directory.Move(staging, destination);
+            copy.Folder = destination;
+            copy.IniPath = Path.Combine(destination, Path.GetFileName(source.IniPath));
+            return copy;
+        }
+        finally { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
+    }, token);
 
     // The manifest ID belongs to authored content, not to an installation.
     // A separate directory gives copies independent runtime state and ownership.
@@ -302,6 +323,71 @@ internal static class ModService
         mod.Name = name;
     }
 
+    internal static void RenameDisplayName(ModEntry mod, string requestedName)
+    {
+        var name = requestedName.Trim();
+        if (name.Length is 0 or > 80 || name.Any(char.IsControl))
+            throw new IOException(LanguageService.Instance["mods.nameInvalid"]);
+        var original = File.ReadAllBytes(mod.IniPath);
+        var sections = ParseIni(File.ReadAllLines(mod.IniPath));
+        var values = new Dictionary<string, string?> { ["name"] = name };
+        if (sections.TryGetValue("Mod", out var metadata) && metadata.ContainsKey("title")) values["title"] = name;
+        var updated = UpdateIni(original, new Dictionary<string, IReadOnlyDictionary<string, string?>> { ["Mod"] = values });
+        WriteBytesAtomic(mod.IniPath, updated);
+        mod.Name = name;
+    }
+
+    // One byte-preserving INI editor for metadata and target relationships.
+    // null removes a key. Unmentioned fields, comments and section names survive.
+    internal static byte[] UpdateIni(byte[] source, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string?>> changes,
+        ISet<string>? removeSections = null)
+    {
+        var (encoding, preambleLength) = DetectEncoding(source);
+        var lines = SplitIniLines(encoding.GetString(source, preambleLength, source.Length - preambleLength));
+        var newline = lines.FirstOrDefault(l => l.Ending.Length > 0)?.Ending ?? Environment.NewLine;
+        if (removeSections is not null)
+        {
+            var removing = false;
+            for (var i = 0; i < lines.Count; i++)
+            {
+                var text = lines[i].Content.Trim();
+                if (text.StartsWith('[') && text.EndsWith(']')) removing = removeSections.Contains(text[1..^1].Trim());
+                if (removing) lines.RemoveAt(i--);
+            }
+        }
+        foreach (var section in changes)
+        {
+            var current = "";
+            var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var insert = -1;
+            for (var i = 0; i < lines.Count; i++)
+            {
+                var line = lines[i].Content.Trim();
+                if (line.StartsWith('[') && line.EndsWith(']')) current = line[1..^1].Trim();
+                if (!current.Equals(section.Key, StringComparison.OrdinalIgnoreCase)) continue;
+                insert = i + 1;
+                if (line.StartsWith(';') || line.StartsWith('#')) continue;
+                var equal = line.IndexOf('=');
+                if (equal <= 0 || !section.Value.TryGetValue(line[..equal].Trim(), out var value)) continue;
+                found.Add(line[..equal].Trim());
+                if (value is null) { lines.RemoveAt(i--); insert--; }
+                else SetIniValue(lines[i], value);
+            }
+            var additions = section.Value.Where(p => p.Value is not null && !found.Contains(p.Key)).ToArray();
+            if (additions.Length == 0) continue;
+            if (insert < 0)
+            {
+                insert = lines.Count;
+                if (insert > 0 && lines[insert - 1].Ending.Length == 0) lines[insert - 1].Ending = newline;
+                lines.Insert(insert++, new IniLine("[" + section.Key + "]", newline));
+            }
+            if (insert > 0 && lines[insert - 1].Ending.Length == 0) lines[insert - 1].Ending = newline;
+            foreach (var pair in additions) lines.Insert(insert++, new IniLine(pair.Key + "=" + pair.Value, newline));
+        }
+        var payload = encoding.GetBytes(string.Concat(lines.Select(l => l.Content + l.Ending)));
+        return encoding.GetPreamble().Concat(payload).ToArray();
+    }
+
     private static string ValidateModName(string requestedName)
     {
         var name = requestedName.Trim();
@@ -428,7 +514,7 @@ internal static class ModService
         }
     }
 
-    private static void WriteBytesAtomic(string path, byte[] content)
+    internal static void WriteBytesAtomic(string path, byte[] content)
     {
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try

@@ -42,6 +42,10 @@ internal static partial class GitHubReleaseService
                 await delay(TimeSpan.FromMilliseconds(400 * (attempt + 1)), token);
                 continue;
             }
+            catch (Exception error)
+            {
+                throw ActivityLog.WithRecovery(error, RecoveryHelp.Release(repository));
+            }
             using (response)
             {
                 if (response.StatusCode == HttpStatusCode.NotFound) return null;
@@ -64,7 +68,8 @@ internal static partial class GitHubReleaseService
                     }
                     var reason = limited ? "GitHub API rate limit reached; retry later. The release website may still be reachable." :
                         $"GitHub release lookup failed (HTTP {(int)response.StatusCode}).";
-                    throw new HttpRequestException(repository + ": " + reason, null, response.StatusCode);
+                    throw ActivityLog.WithRecovery(new HttpRequestException(repository + ": " + reason, null, response.StatusCode),
+                        RecoveryHelp.Release(repository));
                 }
                 await using var stream = await response.Content.ReadAsStreamAsync(token);
                 return await JsonSerializer.DeserializeAsync<GitHubRelease>(stream, JsonOptions, token);

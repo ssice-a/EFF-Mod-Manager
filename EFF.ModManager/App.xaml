@@ -1,7 +1,6 @@
 <Application x:Class="EffModManager.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="MainWindow.xaml">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <Application.Resources>
     <SolidColorBrush x:Key="Ink" Color="#202A31" />
     <SolidColorBrush x:Key="Muted" Color="#68757C" />
