@@ -49,17 +49,27 @@ internal sealed class WeaponListing(IReadOnlyList<WeaponChoice> choices, Func<We
 // Load once off the UI thread; only the selected Prefab is parsed when applying.
 internal sealed class WeaponCatalog
 {
-    internal static WeaponListing Listing(string game, string resources, CancellationToken token, bool refresh = false)
+    internal static async Task<WeaponListing> ListingAsync(string game, string resources, IProgress<string>? progress,
+        CancellationToken token, bool refresh = false)
     {
         WeaponCatalog? catalog = null;
-        var saved = GameCatalogCache.Load(game, resources, "weapons", SharedResources.IndexWorkspace, () =>
+        var saved = await GameCatalogCache.LoadAsync(game, resources, "weapons", SharedResources.IndexWorkspace, async () =>
         {
-            catalog = Load(game, resources, token);
+            var archive = EndfieldVfsArchive.Open(game);
+            var workspace = await IndexAcquisition.ResolveAsync(archive, "", resources, progress, token).ConfigureAwait(false);
+            catalog = Load(archive, workspace, token);
             return new CatalogData<WeaponChoice[]>(catalog.Choices.ToArray(), catalog._indexPath);
-        }, token, refresh);
+        }, token, refresh).ConfigureAwait(false);
         return new(saved.Value, (choice, cancellation) =>
         {
-            catalog ??= Load(game, resources, cancellation);
+            if (catalog is null)
+            {
+                var archive = EndfieldVfsArchive.Open(game);
+                var workspace = EndfieldSharedIndexes.WorkspacePath(saved.IndexPath);
+                if (!EndfieldVfsAssetIndexBuilder.TryGetCurrentIndex(archive, workspace, out _))
+                    throw new InvalidDataException(LanguageService.Instance["weapon.indexMissing"]);
+                catalog = Load(archive, workspace, cancellation);
+            }
             return catalog.Resolve(choice, cancellation);
         });
     }
@@ -76,13 +86,8 @@ internal sealed class WeaponCatalog
         IReadOnlyDictionary<string, EndfieldBundleIndexSpan> spans)
         => (_archive, _meshes, _cabOwners, Choices, _indexPath, _spans) = (archive, meshes, owners, choices, indexPath, spans);
 
-    internal static WeaponCatalog Load(string game, string resourceRoot, CancellationToken token)
+    private static WeaponCatalog Load(EndfieldVfsArchive archive, string workspace, CancellationToken token)
     {
-        var archive = EndfieldVfsArchive.Open(game);
-        var workspace = EndfieldSharedIndexes.FindCurrent(archive, token, resourceRoot);
-        if (string.IsNullOrEmpty(workspace)) throw ActivityLog.WithRecovery(
-            new FileNotFoundException(LanguageService.Instance["weapon.indexMissing"]),
-            RecoveryHelp.Index(resourceRoot, EndfieldSharedIndexes.DefaultWorkspace(game, resourceRoot)));
         token.ThrowIfCancellationRequested();
         var indexPath = EndfieldVfsAssetIndexBuilder.GetIndexPath(workspace);
         var index = EndfieldIndexStore.Load(indexPath, recordFilter: r =>

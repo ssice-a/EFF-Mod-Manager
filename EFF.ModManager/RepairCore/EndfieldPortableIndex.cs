@@ -69,7 +69,8 @@ internal static class EndfieldPortableIndex
         {
             using var file = File.OpenRead(package);using var gzip = new GZipStream(file, CompressionMode.Decompress);using var reader = new BinaryReader(gzip, Encoding.UTF8, true);
             var magic = reader.ReadString();var publishedContent = reader.ReadString();
-            if (magic != Magic || publishedContent != expectedContent) throw new InvalidDataException("Published index metadata does not match its catalog entry");
+            if (magic != Magic) throw new InvalidDataException("Invalid portable index package: " + Path.GetFileName(package));
+            if (publishedContent != expectedContent) throw new InvalidDataException("Index package does not match the installed game: " + Path.GetFileName(package));
             long length = reader.ReadInt64();var expected = reader.ReadString();var bundles = Bundles(archive);
             int count = reader.ReadInt32();
             if (length < 17 || expected.Length != 64 || count != bundles.Length) throw new InvalidDataException("Invalid public index envelope");

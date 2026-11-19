@@ -1,38 +1,39 @@
-using AnimeStudio;
 using AnimeStudio.GUI;
 using System.Net.Http;
 using System.Text.Json;
 
 namespace EffModManager;
 
-// One acquisition policy for migration: validate what is already local first,
-// then try an exact public index, then build with the bundled source reader.
+// Shared acquisition policy for migration and weapon discovery. Reuse local
+// indexes and packages, otherwise download an exact match published on GitHub.
 internal static class IndexAcquisition
 {
-    internal static async Task<string> ResolveAsync(string game, string selected, string resourceRoot,
+    internal static Task<string> ResolveAsync(string game, string selected, string resourceRoot,
+        IProgress<string>? progress, CancellationToken token, HttpClient? client = null) =>
+        Task.Run(() => ResolveAsync(EndfieldVfsArchive.Open(game), selected, resourceRoot, progress, token, client), token);
+
+    internal static async Task<string> ResolveAsync(EndfieldVfsArchive archive, string selected, string resourceRoot,
         IProgress<string>? progress, CancellationToken token, HttpClient? client = null)
     {
-        try { return await ResolveCoreAsync(game, selected, resourceRoot, progress, token, client); }
+        var workspace = EndfieldSharedIndexes.DefaultWorkspace(EndfieldSharedIndexes.Game(archive), resourceRoot);
+        try { return await ResolveCoreAsync(archive, selected, resourceRoot, workspace, progress, token, client).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception error)
         {
-            if (error.Data[nameof(RecoveryAdvice)] is null)
-                ActivityLog.WithRecovery(error, RecoveryHelp.Index(resourceRoot,
-                    EndfieldSharedIndexes.DefaultWorkspace(game, resourceRoot)));
-            throw;
+            var advice = error.Data[nameof(RecoveryAdvice)] as RecoveryAdvice ?? RecoveryHelp.Index(resourceRoot, workspace);
+            throw ActivityLog.WithRecovery(error, advice);
         }
     }
 
-    private static async Task<string> ResolveCoreAsync(string game, string selected, string resourceRoot,
+    private static async Task<string> ResolveCoreAsync(EndfieldVfsArchive archive, string selected, string resourceRoot, string defaultWorkspace,
         IProgress<string>? progress, CancellationToken token, HttpClient? client)
     {
-        var archive = await Task.Run(() => EndfieldVfsArchive.Open(game), token);
-        var defaultWorkspace = EndfieldSharedIndexes.DefaultWorkspace(EndfieldSharedIndexes.Game(archive), resourceRoot);
         var explicitPackage = !string.IsNullOrWhiteSpace(selected) && selected.EndsWith(".effindex.gz", StringComparison.OrdinalIgnoreCase);
         if (explicitPackage && !File.Exists(selected)) throw new FileNotFoundException("The selected portable index package is missing.", selected);
         var existing = explicitPackage ? null : EndfieldSharedIndexes.FindCurrent(archive, token, selected, defaultWorkspace);
         if (!string.IsNullOrWhiteSpace(existing)) return existing;
         if (string.IsNullOrWhiteSpace(resourceRoot))
-            throw new IOException("Choose a resource/index folder before migrating Format 2 Mods.");
+            throw new IOException("Choose a resource folder in Settings to store the game index.");
         var content = EndfieldPortableIndex.ContentIdentity(archive);
         var workspace = !string.IsNullOrWhiteSpace(selected) && !File.Exists(selected)
             ? Path.GetFullPath(selected) : defaultWorkspace;
@@ -59,35 +60,21 @@ internal static class IndexAcquisition
             }
         }
 
+        progress?.Report("Finding a public index for this game's exact Bundle contents...");
+        var published = await EndfieldIndexUpdates.Find(EndfieldIndexUpdates.DefaultSource, content, token, client!).ConfigureAwait(false);
+        if (published is null || !string.Equals(published.Release.GameContent, content, StringComparison.OrdinalIgnoreCase))
+            throw new FileNotFoundException($"EFF has not published an asset index for this game content ({content}).");
+
+        var destination = EndfieldIndexUpdates.CachedPackage(published, resourceRoot);
         try
         {
-            progress?.Report("Finding a public index for this game's exact Bundle contents...");
-            var published = await EndfieldIndexUpdates.Find(EndfieldIndexUpdates.DefaultSource, content, token, client!);
-            if (published is not null && string.Equals(published.Release.GameContent, content, StringComparison.OrdinalIgnoreCase))
-            {
-                var package = EndfieldIndexUpdates.CachedPackage(published, resourceRoot);
-                try { await EndfieldIndexUpdates.Download(published, package, progress!, token, client!); }
-                catch (Exception error)
-                {
-                    throw ActivityLog.WithRecovery(error, RecoveryHelp.Index(resourceRoot, workspace, published.Url));
-                }
-                return Import(archive, workspace, package, content, token);
-            }
-            progress?.Report("No exact public index exists; building from the local game.");
+            await EndfieldIndexUpdates.Download(published, destination, progress!, token, client!).ConfigureAwait(false);
+            return Import(archive, workspace, destination, content, token);
         }
-        catch (Exception error) when (!token.IsCancellationRequested &&
-            error is HttpRequestException or IOException or TaskCanceledException or InvalidDataException or JsonException)
+        catch (Exception error) when (!token.IsCancellationRequested)
         {
-            ActivityLog.Default.Failure("log.index", error, RecoveryHelp.Index(resourceRoot, workspace), warning: true);
-            progress?.Report("Public index unavailable; building from the local game: " + error.Message);
+            throw ActivityLog.WithRecovery(error, RecoveryHelp.Index(resourceRoot, workspace, published.Url));
         }
-        token.ThrowIfCancellationRequested();
-        var buildProgress = new InlineIndexProgress(value => progress?.Report(
-            $"Local index: {value.ProcessedBundles}/{value.TotalBundles} Bundles, {value.AssetCount} assets; {value.CurrentPath}"));
-        await EndfieldVfsAssetIndexBuilder.BuildAsync(archive, workspace,
-            GameManager.GetGameByType(GameType.ArknightsEndfield), buildProgress, token);
-        Validate(archive, workspace, token);
-        return workspace;
     }
 
     private static string Import(EndfieldVfsArchive archive, string workspace, string package, string content, CancellationToken token)
@@ -112,10 +99,5 @@ internal static class IndexAcquisition
             Path.Combine(resourceRoot, ".effmm-cache", "indexes", content[21..]) };
         return roots.Where(Directory.Exists).SelectMany(path => Directory.EnumerateFiles(path, "*.effindex.gz", SearchOption.TopDirectoryOnly))
             .Order(StringComparer.OrdinalIgnoreCase).ToArray();
-    }
-
-    private sealed class InlineIndexProgress(Action<EndfieldIndexProgress> report) : IProgress<EndfieldIndexProgress>
-    {
-        public void Report(EndfieldIndexProgress value) => report(value);
     }
 }

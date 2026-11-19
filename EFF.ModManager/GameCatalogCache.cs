@@ -13,7 +13,11 @@ internal static class GameCatalogCache
     private const string Format = "EFF_MANAGER_CATALOG/1";
 
     internal static CatalogData<T> Load<T>(string game, string resources, string name, string selectedWorkspace,
-        Func<CatalogData<T>> build, CancellationToken token, bool refresh = false)
+        Func<CatalogData<T>> build, CancellationToken token, bool refresh = false) =>
+        LoadAsync(game, resources, name, selectedWorkspace, () => Task.FromResult(build()), token, refresh).GetAwaiter().GetResult();
+
+    internal static async Task<CatalogData<T>> LoadAsync<T>(string game, string resources, string name, string selectedWorkspace,
+        Func<Task<CatalogData<T>>> build, CancellationToken token, bool refresh = false)
     {
         game = Path.GetFullPath(game);
         var root = string.IsNullOrWhiteSpace(resources) ? Path.Combine(game, "plugin") : resources;
@@ -27,20 +31,20 @@ internal static class GameCatalogCache
                 if (new FileInfo(path).Length > 4 * 1024 * 1024) throw new InvalidDataException("Catalog cache is too large: " + path);
                 var saved = JsonSerializer.Deserialize<Saved<T>>(File.ReadAllText(path));
                 if (saved is not null && saved.Format == Format && saved.Game == game && saved.Selection == selectedWorkspace &&
-                    saved.GameFiles.SequenceEqual(before) && saved.IndexFiles.SequenceEqual(IndexFiles(saved.Data.IndexPath)))
+                    saved.GameFiles.SequenceEqual(WithIndexLocations(before)) && saved.IndexFiles.SequenceEqual(IndexFiles(saved.Data.IndexPath)))
                     return saved.Data;
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or NullReferenceException)
             { ActivityLog.Default.Failure("log.catalog", error, warning: true); }
         }
-        var result = build();
+        var result = await build().ConfigureAwait(false);
         token.ThrowIfCancellationRequested();
         var after = GameFiles(game);
         if (!before.SequenceEqual(after)) throw new IOException("Game files changed while the catalog was being built. Retry after the game update finishes.");
         try
         {
             SettingsStore.WriteAtomic(path, JsonSerializer.Serialize(new Saved<T>(Format, game, selectedWorkspace,
-                after, IndexFiles(result.IndexPath), result)));
+                WithIndexLocations(after), IndexFiles(result.IndexPath), result)));
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         { ActivityLog.Default.Failure("log.catalog", error, warning: true); }
@@ -60,9 +64,12 @@ internal static class GameCatalogCache
         if (!roots.Any(Directory.Exists)) roots = [game];
         // BLC file additions/removals/changes invalidate names. No VFS block or .eidx is opened on a hit.
         return roots.Where(Directory.Exists).SelectMany(r => Directory.EnumerateFiles(r, "*.blc", SearchOption.AllDirectories))
-            .Append(SharedResources.SettingsPath).Append(Path.Combine(SharedResources.MetadataRoot, "registry.json"))
             .Order(StringComparer.OrdinalIgnoreCase).Select(Stat).ToArray();
     }
+
+    private static Stamp[] WithIndexLocations(Stamp[] gameFiles) => gameFiles
+        .Append(Stat(SharedResources.SettingsPath)).Append(Stat(Path.Combine(SharedResources.MetadataRoot, "registry.json")))
+        .OrderBy(stamp => stamp.Path, StringComparer.OrdinalIgnoreCase).ToArray();
 
     private static Stamp[] IndexFiles(string path) => path.Length == 0 ? [] : new[]
     {

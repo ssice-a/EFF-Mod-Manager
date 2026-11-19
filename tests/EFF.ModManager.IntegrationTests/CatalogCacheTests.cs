@@ -2,7 +2,7 @@ using EffModManager;
 
 internal static class CatalogCacheTests
 {
-    internal static void Run(string root)
+    internal static async Task RunAsync(string root)
     {
         var game = Path.Combine(root, "catalog-game");
         var resources = Path.Combine(root, "catalog-resources");
@@ -26,7 +26,7 @@ internal static class CatalogCacheTests
             // New listing objects mimic new Manager sessions. Neither the index nor VFS is readable.
             for (var run = 0; run < 2; run++)
             {
-                Require(WeaponCatalog.Listing(game, resources, CancellationToken.None).Choices.Single() == choices[0],
+                Require((await WeaponCatalog.ListingAsync(game, resources, null, CancellationToken.None)).Choices.Single() == choices[0],
                     "Restarted listing lost the bilingual weapon choices.");
                 Require(CharacterTargets.Load(game, CancellationToken.None).Label("chr_0001_test", true).Contains("Character EN"),
                     "Character names re-read VFS instead of the persisted name list.");

@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
+using System.Text.Json;
 using EffModManager;
+using AnimeStudio;
 using AnimeStudio.GUI;
 using System.Net;
 
@@ -13,7 +15,7 @@ try
 {
     WeaponTests.Run(root);
     CharacterTargetTests.Run(root);
-    CatalogCacheTests.Run(root);
+    await CatalogCacheTests.RunAsync(root);
     await VerifyFormat3UiRepairAsync(root);
     await VerifyOfflineIndexAsync(root);
     VerifySourceReaderDependencies();
@@ -106,7 +108,6 @@ static void Require(bool value, string message)
 static async Task VerifyOfflineIndexAsync(string root)
 {
     var game = Path.Combine(root, "offline-game");
-    var resources = Path.Combine(root, "offline-resources");
     var vfs = Path.Combine(game, "Endfield_Data", "StreamingAssets", "VFS");
     Directory.CreateDirectory(vfs);
     File.WriteAllText(Path.Combine(game, "Endfield.exe"), "fixture");
@@ -114,14 +115,14 @@ static async Task VerifyOfflineIndexAsync(string root)
     IndexFixture.WriteVfs(vfs);
     var offline = new OfflineHandler();
     using var client = new HttpClient(offline);
-    var messages = new List<string>();
-    var workspace = await LegacyMigrationService.ResolveWorkspaceAsync(game, "", resources,
-        new InlineProgress(messages.Add), CancellationToken.None, client);
     var archive = EndfieldVfsArchive.Open(game);
-    Require(EndfieldVfsAssetIndexBuilder.TryGetCurrentIndex(archive, workspace, out var index), "Offline fallback did not publish a validated local index.");
+    var workspace = Path.Combine(root, "publisher-workspace");
+    await EndfieldVfsAssetIndexBuilder.BuildAsync(archive, workspace,
+        GameManager.GetGameByType(GameType.ArknightsEndfield), new InlineIndexProgress(), CancellationToken.None);
+    Require(EndfieldVfsAssetIndexBuilder.TryGetCurrentIndex(archive, workspace, out var index), "Publisher fixture did not produce a validated local index.");
     var loaded = EndfieldIndexStore.Load(index);
     Require(loaded.StoredAssetCount == 1 && loaded.Assets.Records.Any(item => item.Name == "OfflineFixture"),
-        "Offline fallback did not parse the real UnityFS/SerializedFile fixture through the bundled reader.");
+        "Publisher fixture did not parse the real UnityFS/SerializedFile fixture through the bundled reader.");
     var span = EndfieldBundleIndexCache.TryLoad(index)!.Spans.Values.Single();
     Require(EndfieldIndexStore.ReadBundleAssets(index, span, default).Single().Name == "OfflineFixture",
         "Bounded Bundle lookup did not reuse the incremental index range.");
@@ -129,7 +130,7 @@ static async Task VerifyOfflineIndexAsync(string root)
     try { EndfieldIndexStore.ReadBundleAssets(index, span with { Sha256 = new byte[32] }, default); }
     catch (InvalidDataException) { corruptRangeRejected = true; }
     Require(corruptRangeRejected, "Corrupt Bundle index range was accepted.");
-    Console.WriteLine("PASS: actual migration resolver builds and validates a fresh index from local game VFS when network is unavailable.");
+    Console.WriteLine("PASS: publisher fixture builds a complete index from local game VFS for package tests.");
 
     var package = Path.Combine(root, "manual.effindex.gz");
     var release = EndfieldPortableIndex.Pack(archive, workspace, package, "fixture");
@@ -147,28 +148,84 @@ static async Task VerifyOfflineIndexAsync(string root)
     Require(rejected && saved.SequenceEqual(Snapshot(manualWorkspace)), "Invalid explicit package silently reused another index or altered the valid workspace.");
     Console.WriteLine("PASS: explicit portable-index import is offline, validates actual envelope and game identity, and retains the committed workspace on corruption.");
 
-    var cachedGame = Path.Combine(root, "cached-game");
-    var cachedVfs = Path.Combine(cachedGame, "Endfield_Data", "StreamingAssets", "VFS");
-    Directory.CreateDirectory(cachedVfs);
-    IndexFixture.WriteVfs(cachedVfs);
-    var cachedResources = Path.Combine(root, "cached-resources");
-    Directory.CreateDirectory(cachedResources);
-    File.Copy(package, Path.Combine(cachedResources, "downloaded.effindex.gz"));
-    var calls = offline.Requests;
-    var cachedWorkspace = await IndexAcquisition.ResolveAsync(cachedGame, "", cachedResources, null, CancellationToken.None, client);
-    Require(offline.Requests == calls && EndfieldVfsAssetIndexBuilder.TryGetCurrentIndex(EndfieldVfsArchive.Open(cachedGame), cachedWorkspace, out _),
-        "A manually downloaded local package required a public catalogue request.");
-    Console.WriteLine("PASS: a locally downloaded portable index is detected and imported before any network request.");
+    var previousCatalogSource = Environment.GetEnvironmentVariable("EFF_INDEX_CATALOG");
+    try
+    {
+        Environment.SetEnvironmentVariable("EFF_INDEX_CATALOG", "https://api.github.com/repos/ssice-a/EFF/releases?per_page=100");
+        var publishedHandler = new PublishedIndexHandler(package, release);
+        using var publishedClient = new HttpClient(publishedHandler);
+        var publishedGame = Path.Combine(root, "published-game");
+        var publishedVfs = Path.Combine(publishedGame, "Endfield_Data", "StreamingAssets", "VFS");
+        Directory.CreateDirectory(publishedVfs);
+        IndexFixture.WriteVfs(publishedVfs);
+        File.WriteAllText(Path.Combine(publishedGame, "Endfield.exe"), "fixture");
+        var publishedResources = Path.Combine(root, "published-index-resources");
+        var publishedWorkspace = await IndexAcquisition.ResolveAsync(publishedGame, "", publishedResources, null,
+            CancellationToken.None, publishedClient);
+        Require(publishedHandler.PackageDownloads == 1,
+            $"Expected one published package download, got {publishedHandler.PackageDownloads} from {publishedHandler.Requests} requests.");
+        Require(EndfieldVfsAssetIndexBuilder.TryGetCurrentIndex(EndfieldVfsArchive.Open(publishedGame), publishedWorkspace, out _),
+            "A downloaded GitHub index was not imported into a validated workspace.");
+        var savedRequests = publishedHandler.Requests;
+        await IndexAcquisition.ResolveAsync(publishedGame, "", publishedResources, null, CancellationToken.None, publishedClient);
+        Require(publishedHandler.Requests == savedRequests, "A valid imported workspace triggered another GitHub lookup.");
+
+        var manualGame = Path.Combine(root, "manual-recovery-game");
+        var manualVfs = Path.Combine(manualGame, "Endfield_Data", "StreamingAssets", "VFS");
+        Directory.CreateDirectory(manualVfs);
+        IndexFixture.WriteVfs(manualVfs);
+        var manualResourcesAfterFailure = Path.Combine(root, "manual-recovery-resources");
+        publishedHandler.FailPackageDownload = true;
+        try
+        {
+            await IndexAcquisition.ResolveAsync(manualGame, "", manualResourcesAfterFailure, null,
+                CancellationToken.None, publishedClient);
+            throw new InvalidOperationException("A failed GitHub package download was reported as a successful import.");
+        }
+        catch (HttpRequestException error)
+        {
+            Require(error.Data[nameof(RecoveryAdvice)] is RecoveryAdvice advice &&
+                advice.Links.Contains(PublishedIndexHandler.DownloadUrl),
+                "Package download failure did not expose the exact download URL.");
+        }
+        var manualFolder = Path.Combine(manualResourcesAfterFailure, "indexes");
+        Directory.CreateDirectory(manualFolder);
+        File.Copy(package, Path.Combine(manualFolder, "manual-download.effindex.gz"));
+        savedRequests = publishedHandler.Requests;
+        var manualRecovery = await IndexAcquisition.ResolveAsync(manualGame, "", manualResourcesAfterFailure, null,
+            CancellationToken.None, publishedClient);
+        Require(publishedHandler.Requests == savedRequests && EndfieldVfsAssetIndexBuilder.TryGetCurrentIndex(
+            EndfieldVfsArchive.Open(manualGame), manualRecovery, out _),
+            "Retry after a failed download did not import the manually placed archive offline.");
+    }
+    finally { Environment.SetEnvironmentVariable("EFF_INDEX_CATALOG", previousCatalogSource); }
+    Console.WriteLine("PASS: an exact GitHub catalog entry downloads and imports once, then reuses the validated local workspace.");
+    Console.WriteLine("PASS: a failed GitHub package download exposes the exact URL and retry imports the manually placed package offline.");
 
     var unpublishedGame = Path.Combine(root, "unpublished-game");
     var unpublishedVfs = Path.Combine(unpublishedGame, "Endfield_Data", "StreamingAssets", "VFS");
     Directory.CreateDirectory(unpublishedVfs);
     IndexFixture.WriteVfs(unpublishedVfs);
     using var notFound = new HttpClient(new MissingCatalogueHandler());
-    var unpublishedWorkspace = await IndexAcquisition.ResolveAsync(unpublishedGame, "", Path.Combine(root, "unpublished-resources"), null, CancellationToken.None, notFound);
-    Require(EndfieldVfsAssetIndexBuilder.TryGetCurrentIndex(EndfieldVfsArchive.Open(unpublishedGame), unpublishedWorkspace, out _),
-        "No matching public index prevented a local build.");
-    Console.WriteLine("PASS: unpublished game content falls back to the bundled local index builder.");
+    var unpublishedResources = Path.Combine(root, "unpublished-resources");
+    var unpublishedFailed = false;
+    try
+    {
+        await IndexAcquisition.ResolveAsync(unpublishedGame, "", unpublishedResources, null,
+            CancellationToken.None, notFound);
+    }
+    catch (FileNotFoundException error)
+    {
+        unpublishedFailed = error.Data[nameof(RecoveryAdvice)] is RecoveryAdvice advice &&
+            advice.Links.Contains(RecoveryHelp.EffIndexCatalog) && advice.Links.Contains(RecoveryHelp.EffIndexRequest);
+    }
+    var unpublishedArchive = EndfieldVfsArchive.Open(unpublishedGame);
+    var unpublishedWorkspace = EndfieldSharedIndexes.DefaultWorkspace(
+        EndfieldSharedIndexes.Game(unpublishedArchive), unpublishedResources);
+    var unpublishedIndex = EndfieldVfsAssetIndexBuilder.GetIndexPath(unpublishedWorkspace);
+    Require(unpublishedFailed && !File.Exists(unpublishedIndex),
+        "Missing published game content did not provide GitHub recovery links or incorrectly built a local index.");
+    Console.WriteLine("PASS: unpublished game content reports GitHub recovery without local index construction.");
 }
 
 static void VerifySourceReaderDependencies()
@@ -190,6 +247,11 @@ sealed class InlineProgress(Action<string> write) : IProgress<string>
     public void Report(string value) => write(value);
 }
 
+sealed class InlineIndexProgress : IProgress<EndfieldIndexProgress>
+{
+    public void Report(EndfieldIndexProgress value) { }
+}
+
 sealed class OfflineHandler : HttpMessageHandler
 {
     public int Requests { get; private set; }
@@ -204,4 +266,39 @@ sealed class MissingCatalogueHandler : HttpMessageHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
         Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+}
+
+sealed class PublishedIndexHandler(string package, EndfieldIndexRelease release) : HttpMessageHandler
+{
+    internal const string DownloadUrl = "https://github.com/ssice-a/EFF/releases/download/fixture/index.effindex.gz";
+    private readonly RepairCatalog _catalog = new("EFF_REPAIR_CATALOG/1", "fixture", "", [
+        new IndexDownload(release, DownloadUrl)]);
+    internal int Requests { get; private set; }
+    internal int PackageDownloads { get; private set; }
+    internal bool FailPackageDownload { get; set; }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+    {
+        Requests++;
+        var path = request.RequestUri!.AbsolutePath;
+        if (path.EndsWith("/releases", StringComparison.OrdinalIgnoreCase))
+        {
+            var response = new[] { new { assets = new[] { new { name = "eff-index-catalog.json", browser_download_url = "https://github.com/ssice-a/EFF/releases/download/fixture/eff-index-catalog.json" } } } };
+            return Task.FromResult(JsonResponse(JsonSerializer.Serialize(response)));
+        }
+        if (path.EndsWith("eff-index-catalog.json", StringComparison.OrdinalIgnoreCase))
+            return Task.FromResult(JsonResponse(JsonSerializer.Serialize(_catalog)));
+        if (path.EndsWith("index.effindex.gz", StringComparison.OrdinalIgnoreCase))
+        {
+            PackageDownloads++;
+            if (FailPackageDownload) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(File.ReadAllBytes(package)) });
+        }
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+    }
+
+    private static HttpResponseMessage JsonResponse(string json) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
+    };
 }

@@ -17,8 +17,9 @@ internal static class ActivityLogTests
         var timeout = ActivityLog.WithRecovery(new TimeoutException("fixture timed out"), RecoveryHelp.Index(indexFolder, "", direct));
         log.Failure("log.index", timeout);
         var entry = log.Snapshot().Single();
-        Require(entry.Reason == "log.timeout" && entry.Recovery!.Links.Contains(direct) && entry.Steps.Contains(indexFolder),
-            "Timeout lost its actual URL or local recovery directory.");
+        Require(entry.Reason == "log.timeout" && entry.Recovery!.Links.Contains(direct) &&
+            entry.Recovery.Links.Contains(RecoveryHelp.EffIndexCatalog) && entry.Steps.Contains(indexFolder),
+            "Timeout lost its actual URL, index catalog link or local recovery directory.");
         Require(ActivityLog.Classify(new HttpRequestException("rate limited", null, HttpStatusCode.TooManyRequests)) == "log.rateLimit" &&
             ActivityLog.Classify(new FileNotFoundException("missing index")) == "log.missing", "Failure causes were conflated.");
 

@@ -124,6 +124,8 @@ internal sealed class ActivityLog
 internal static class RecoveryHelp
 {
     internal const string EffReleases = "https://github.com/ssice-a/EFF/releases";
+    internal const string EffIndexCatalog = "https://github.com/ssice-a/EFF/releases/latest/download/eff-index-catalog.json";
+    internal const string EffIndexRequest = "https://github.com/ssice-a/EFF/issues/new?title=Publish%20game-matched%20asset%20index";
     internal const string ManagerReleases = "https://github.com/ssice-a/EFF-Mod-Manager/releases/latest";
     internal const string ToolsManifest = "https://github.com/ssice-a/EFF/releases/latest/download/eff-native-tools.json";
 
@@ -131,7 +133,7 @@ internal static class RecoveryHelp
     {
         var folder = string.IsNullOrWhiteSpace(root) ? "" : Path.Combine(root, "indexes");
         return new(folder.Length == 0 ? "log.indexChooseRoot" : "log.indexSteps",
-            folder, folder, url is null ? [EffReleases] : [url, EffReleases], workspace);
+            folder, folder, url is null ? [EffIndexCatalog, EffReleases, EffIndexRequest] : [url, EffIndexCatalog, EffReleases, EffIndexRequest], workspace);
     }
 
     internal static RecoveryAdvice Tools(string root, string? url = null)

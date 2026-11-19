@@ -43,7 +43,11 @@ public partial class MainWindow
             if (refresh || _weaponCatalogTask is null || _weaponCatalogTask.IsFaulted || _weaponCatalogTask.IsCanceled || location != _weaponCatalogLocation)
             {
                 _weaponCatalogLocation = location;
-                _weaponCatalogTask = Task.Run(() => WeaponCatalog.Listing(game, resources, _shutdown.Token, refresh), _shutdown.Token);
+                var progress = new Progress<string>(value =>
+                {
+                    if (version == _weaponDetailsVersion) WeaponStatus.Text = value;
+                });
+                _weaponCatalogTask = Task.Run(() => WeaponCatalog.ListingAsync(game, resources, progress, _shutdown.Token, refresh), _shutdown.Token);
             }
             var catalog = await _weaponCatalogTask;
             if (version != _weaponDetailsVersion || !ReferenceEquals(ModsList.SelectedItem, mod)) return;
@@ -72,7 +76,8 @@ public partial class MainWindow
             if (version == _weaponDetailsVersion)
             {
                 WeaponStatus.Text = error.Message + " " + T("log.seeLogs");
-                ActivityLog.Default.Failure("log.weaponCatalog", error, RecoveryHelp.Index(_settings.ResourceRoot));
+                ActivityLog.Default.Failure(error.Data[nameof(RecoveryAdvice)] is RecoveryAdvice ? "log.index" : "log.weaponCatalog",
+                    error, RecoveryHelp.Index(_settings.ResourceRoot));
             }
         }
     }

@@ -860,11 +860,11 @@ public partial class MainWindow : Window
         await ExecuteAsync(async () =>
         {
             var progress = new Progress<string>(value => RepairStatusText.Text = value);
-            var workspace = await Task.Run(() => IndexAcquisition.ResolveAsync(game, dialog.FileName, root, progress, _shutdown.Token), _shutdown.Token);
+            var workspace = await IndexAcquisition.ResolveAsync(game, dialog.FileName, root, progress, _shutdown.Token);
             SharedResources.SetIndexWorkspace(workspace);
             RepairStatusText.Text = string.Format(T("repair.indexImported"), workspace);
             SetStatus(RepairStatusText.Text);
-        });
+        }, operation: "log.index");
     }
 
     private void SelectAllRepair_Click(object sender, RoutedEventArgs e)

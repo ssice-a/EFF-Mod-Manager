@@ -63,7 +63,7 @@ internal static class SharedResources
 
     internal static void SetIndexWorkspace(string path)
     {
-        if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("请选择 AnimeStudio 索引工作区。", nameof(path));
+        if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("请选择完整索引工作区。", nameof(path));
         path = Path.GetFullPath(path);
         Directory.CreateDirectory(MetadataRoot);
         SharedResourceSettings? settings = null;
