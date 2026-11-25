@@ -1,3 +1,10 @@
+# EFF Mod Manager v0.2.8
+
+- Coordinates Endfield index checks, imports, and content rebinding with AnimeStudio through the shared workspace lock.
+- Releases the named mutex while waiting on older lock-file clients, preventing queued index operations from blocking indefinitely.
+
+Requires Windows x64 and .NET 9 Desktop Runtime. Existing settings and Mods are preserved.
+
 # EFF Mod Manager v0.2.3
 
 - 新增 Mod 列表刷新和打开 Mods 目录操作，刷新后保留当前选择并更新安装状态。
